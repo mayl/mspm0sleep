@@ -52,13 +52,18 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
+All Cargo commands must be run inside the Nix development shell to ensure the correct Rust toolchain and cross-compilation targets are available:
 
 ```bash
-# Example:
-# npm install
-# npm test
+# Run cargo via nix develop (recommended; --no-pure-eval needed for devenv)
+nix develop .# --no-pure-eval --command cargo check --features mspm0l1306rhb
+
+# Or enter the shell interactively
+nix develop .# --no-pure-eval
+cargo check --features mspm0l1306rhb
 ```
+
+This applies to builds, checks, and example compilation across the `embassy/` subtree.
 
 ## Architecture Overview
 
