@@ -111,7 +111,7 @@ cargo check -p embassy-mspm0 --features mspm0l1306rhb,executor-thread
 
 # All L-series
 cargo check -p embassy-mspm0 --features mspm0l2228pn
-cargo check -p embassy-mspm0 --features mspm0l1106rhb
+cargo check -p embassy-mspm0 --features mspm0l1106dgs28
 
 # Other families (regression)
 cargo check -p embassy-mspm0 --features mspm0c1104dgs20
@@ -147,7 +147,7 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut led = Output::new(p.PA0, Level::Low);
     led.set_inversion(true);
-    let button = Input::new(p.PA18, Pull::Up);  // Adjust for LaunchPad pin
+    let button = Input::new(p.PA14, Pull::Up);  // S2 button on LaunchPad
 
     loop {
         led.set_high();
@@ -239,16 +239,17 @@ This needs more analysis of which MSPM0 peripherals actually wake from STOP and 
 
 ### Pins
 - **PA0**: LED1 (already used in blinky example, active low)
-- **PA18**: S2 button (verify on LaunchPad schematics)
+- **PA14**: S2 button
 - **SWD**: PA13/PA14 for debug + RTT
 
 ### Power Measurement
 - Remove JP5 (if present) to isolate MCU power
 - Use ammeter in series, or:
 - Use LaunchPad's built-in EnergyTrace if using CCS
-- Expected readings:
+- Expected readings (generic executor, WFE in idle loop):
   - Active (32MHz): ~2-3 mA
-  - SLEEP (4MHz): ~200 µA
+  - SLEEP with generic executor (32MHz SYSOSC still running): ~1-1.5 mA (CPUCLK halted)
+  - SLEEP with custom executor (SYSOSC reduced to 4MHz): ~200 µA
   - STOP (32kHz): ~50 µA
   - STANDBY: ~1-2 µA
 
