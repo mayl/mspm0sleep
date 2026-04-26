@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "mspm0sleep",
+  "project_id": "386abe7b-7738-4158-b9cf-12d736c7bc5c"
+}
