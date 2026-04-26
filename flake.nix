@@ -69,9 +69,10 @@
               "rust-analyzer"
               "rust-src"
             ];
-            targets = [ 
-              "thumbv7m-none-eabi" 
-              "thumbv7em-none-eabi" 
+            targets = [
+              "thumbv6m-none-eabi"
+              "thumbv7m-none-eabi"
+              "thumbv7em-none-eabi"
             ]; #add targets here depending on your target processor
           };
         };
