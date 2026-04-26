@@ -67,3 +67,11 @@ _Add a brief overview of your project architecture_
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_
+
+### Embassy Submodule
+
+The `embassy/` directory is a git submodule pointing to the Embassy fork for this project. AI agents MUST follow these rules when modifying code inside it:
+
+- **No Co-Authored-By lines** in commits within the `embassy/` submodule. Use your standard git config.
+- **Work on feature branches** (e.g. `mspm0l_sleep`) — do not commit directly to `main`.
+- Commit submodule changes **first** inside `embassy/`, then update the parent repo pointer.
