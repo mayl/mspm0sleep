@@ -35,5 +35,6 @@ stdenv.mkDerivation {
     license = licenses.gpl3Only;
     maintainers = [ ];
     platforms = platforms.linux;
+    mainProgram = "energytrace";
   };
 }
