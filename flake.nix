@@ -30,19 +30,20 @@
       imports = [
         inputs.devenv.flakeModule
       ];
-      systems = [ "x86_64-linux" "i686-linux" "x86_64-darwin" "aarch64-linux" "aarch64-darwin" ];
+      systems = [ "x86_64-linux" "aarch64-linux" ];
 
-      perSystem = { config, self', inputs', pkgs, system, ... }:
+      perSystem = { config, lib, self', inputs', pkgs, system, ... }:
         let
-          # A local nixpkgs that allows the TI CCS Theia derivation
-          # (and only that) as unfree. Kept separate from the main
-          # `pkgs` so devenv continues to see a stock nixpkgs.
+          # A local nixpkgs that allows specific unfree TI packages.
+          # Kept separate from the main `pkgs` so devenv continues
+          # to see a stock nixpkgs.
           pkgsUnfree = import inputs.nixpkgs {
             inherit system;
             config.allowUnfreePredicate = pkg:
               builtins.elem (inputs.nixpkgs.lib.getName pkg) [
                 "ccs-theia"
                 "ccs-theia-unwrapped"
+                "msp-debug-stack-bin"
               ];
           };
 
@@ -51,10 +52,12 @@
             if system == "x86_64-linux"
             then pkgsUnfree.callPackage ./nix/ccs-theia.nix { }
             else null;
+
         in
         {
           packages = {
             bd = inputs.beads.packages.${system}.bd;
+            energytrace-util = pkgsUnfree.callPackage ./nix/energytrace-util.nix { };
           } // pkgs.lib.optionalAttrs (ccs-theia != null) {
             ccs-theia = ccs-theia;
           };
@@ -70,12 +73,13 @@
 
           imports = [ ];
 
-          packages = [
-            pkgs.probe-rs-tools
-            pkgs.cargo-embassy
+          packages = with pkgs; [
+            probe-rs-tools
+            cargo-embassy
+            mspds-bin
             inputs.beads.packages.${system}.bd
             inputs.beads.packages.${system}.fish-completions
-          ];
+          ] ++ lib.optional (energytrace-util != null) energytrace-util;
 
           enterShell = ''
             echo "use cargo embassy init <project-name> --chip <chip_name> to make a new project"
@@ -96,7 +100,7 @@
               "thumbv6m-none-eabi"
               "thumbv7m-none-eabi"
               "thumbv7em-none-eabi"
-            ]; #add targets here depending on your target processor
+            ];
           };
         };
 
