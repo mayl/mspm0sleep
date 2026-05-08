@@ -33,10 +33,14 @@ const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
 // ICDI protocol constants
 const SYNC_BYTE: u8 = 0x2a;
 const CMD_ET_SETUP: u8 = 0x1d;
+#[allow(dead_code)]
 const CMD_ET_CALIBRATE: u8 = 0x1e;
 const CMD_ET_START: u8 = 0x1f;
 const CMD_ET_STOP: u8 = 0x20;
 const CMD_XDS_CONNECT_ET: u8 = 0x28;
+const CMD_ET_SETUP_RANGE: u8 = 0x30;
+const CMD_ET_DCDC_SET_VCC: u8 = 0x24;
+const CMD_ET_DCDC_RESTART: u8 = 0x25;
 
 // Interface 2: Command channel (ICDI framing)
 const CMD_IFACE: u8 = 2;
@@ -130,18 +134,44 @@ fn open_xds110() -> Result<Xds110Handle, Box<dyn std::error::Error>> {
         desc.product_id()
     );
 
-    // Claim both command interface (2) and data interface (6)
+    // NOTE: do not call handle.reset() — on this XDS110v3 firmware libusb_reset_device
+    // disappears the probe from the USB bus and a physical replug is required to
+    // recover. After running probe-rs (CMSIS-DAP), a manual replug is currently
+    // needed before ICDI commands work; see beads epic mspm0sleep-a78.
+
+    // Claim both interfaces up front (mirrors libjscxds110.so:_InitializeICDIDeviceBySerial,
+    // which always claims iface 2 then iface 6 before any ICDI command is sent).
     claim_iface(&handle, CMD_IFACE)?;
     claim_iface(&handle, DATA_IFACE)?;
 
-    Ok(Xds110Handle { handle, _ctx: ctx })
+    let xds = Xds110Handle { handle, _ctx: ctx };
+
+    // Drain any stale data on the IN endpoints from a previous session.
+    drain_endpoint(&xds, EP_CMD_IN);
+    drain_endpoint(&xds, EP_DATA_IN);
+
+    Ok(xds)
 }
 
 fn icdi_send(xds: &Xds110Handle, packet: &IcdiPacket) -> Result<(), rusb::Error> {
     let len = packet.len();
-    xds.handle
+    let n = xds.handle
         .write_bulk(EP_CMD_OUT, &packet.buf[..len], CMD_TIMEOUT)?;
+    eprintln!("    [TX {n}/{len}B] {:02x?}", &packet.buf[..len]);
     Ok(())
+}
+
+/// Drain any stale data from the IN endpoint with a short timeout; used to
+/// flush any residue from a prior session before issuing new commands.
+fn drain_endpoint(xds: &Xds110Handle, ep: u8) {
+    let mut tmp = [0u8; 4096];
+    loop {
+        match xds.handle.read_bulk(ep, &mut tmp, Duration::from_millis(50)) {
+            Ok(0) => return,
+            Ok(n) => eprintln!("    [drain ep=0x{ep:02x}] discarded {n} bytes: {:02x?}", &tmp[..n.min(32)]),
+            Err(_) => return,
+        }
+    }
 }
 
 fn icdi_recv(
@@ -283,6 +313,21 @@ fn et_start(xds: &Xds110Handle) -> Result<i32, Box<dyn std::error::Error>> {
     icdi_execute(xds, CMD_ET_START, &[], 2)
 }
 
+fn et_setup_range(xds: &Xds110Handle, range: u8) -> Result<i32, Box<dyn std::error::Error>> {
+    println!("  ET_Setup_Range (cmd=0x30) range={range}...");
+    icdi_execute(xds, CMD_ET_SETUP_RANGE, &[range], 2)
+}
+
+fn et_dcdc_set_vcc(xds: &Xds110Handle, vcc_mv: u16) -> Result<i32, Box<dyn std::error::Error>> {
+    println!("  ET_DCDC_SetVcc (cmd=0x24) vcc_mv={vcc_mv}...");
+    icdi_execute(xds, CMD_ET_DCDC_SET_VCC, &vcc_mv.to_le_bytes(), 2)
+}
+
+fn et_dcdc_restart(xds: &Xds110Handle) -> Result<i32, Box<dyn std::error::Error>> {
+    println!("  ET_DCDC_RestartMCU (cmd=0x25)...");
+    icdi_execute(xds, CMD_ET_DCDC_RESTART, &[], 2)
+}
+
 fn et_stop(xds: &Xds110Handle) -> Result<i32, Box<dyn std::error::Error>> {
     println!("  ET_Stop (cmd=0x20)...");
     icdi_execute(xds, CMD_ET_STOP, &[], 2)
@@ -400,16 +445,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let xds = open_xds110()?;
 
-    // 1. Calibrate to get probe calibration values
-    println!("\n--- Step 1: Calibrate ---");
-    let (cal1_raw, cal2_raw) = et_calibrate(&xds, 0)?;
-    let cal2 = cal2_raw as f64;
-    println!("  cal1={cal1_raw} cal2={cal2_raw} (tickCount=0)");
+    // Flow mirrors XDS_Open + EnergyTrace_LPRF::InitEnergyTrace from
+    // libjscxds110.so / libenergytracestandalone.so:
+    //   1. XDS_ConnectET   — must be the FIRST command on the wire
+    //   2. ET_Calibrate    — performed inside InitEnergyTrace::PerformCalibration
+    //   3. ET_Setup
+    //   4. ET_Start
 
-    // 2. XDS_ConnectET
-    println!("\n--- Step 2: Connect EnergyTrace ---");
+    // 1. XDS_ConnectET (must come first; XDS_Open in the TI library always
+    // sends this immediately after claiming interfaces 2 and 6).
+    println!("\n--- Step 1: Connect EnergyTrace ---");
     let status = et_connect(&xds)?;
     println!("  status = {status}");
+
+    // 1b. DCDC init — set VCC to 3300 mV and restart the DCDC MCU. Without
+    // these, the probe streams sample-counter ticks but doesn't actually
+    // measure target current. Equivalent of MSP430_VCC(3300) in the libmsp430
+    // (XDS110 pre-v3) flow.
+    println!("\n--- Step 1b: DCDC init ---");
+    let status = et_dcdc_set_vcc(&xds, 3300)?;
+    println!("  ET_DCDC_SetVcc status = {status}");
+    let status = et_dcdc_restart(&xds)?;
+    println!("  ET_DCDC_RestartMCU status = {status}");
+
+    // 2. Calibrate (optional — skipped for now). EmulatorComm_XDS110::CalibrateTicks
+    // is invoked from EnergyTrace_LPRF::PerformCalibration in a loop over
+    // `_CalibLoads`, with tickCount taken from each load entry. The right
+    // tickCount values are not yet known, and tickCount=0 gets no response
+    // from this XDS110v3 firmware. Streaming raw data still works without
+    // it; we just lose the µA conversion factor (we'll recover it from
+    // physics — known LED current vs busy-loop delta — in a follow-up).
+    let cal2: f64 = 10186.0; // placeholder from REVERSE_ENGINEERING.md; current calc is approximate
 
     // 3. ET_Setup (analog profiling mode, 10 kHz samples)
     println!("\n--- Step 3: Setup EnergyTrace ---");
@@ -420,63 +486,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status = et_setup(&xds, mode, sample_rate, dig_mode, dig_enable)?;
     println!("  status = {status}");
 
+    // 3b. ET_Setup_Range — selects current sense range. Optional; only sent
+    // if the RANGE env var is set. Plausible values: 0 (low-current) and 1
+    // (high-current), but not yet verified.
+    if let Ok(s) = std::env::var("RANGE") {
+        if let Ok(range) = s.parse::<u8>() {
+            println!("\n--- Step 3b: Set range ---");
+            let status = et_setup_range(&xds, range)?;
+            println!("  status = {status}");
+        }
+    }
+
     // 4. ET_Start
     println!("\n--- Step 4: Start Collection ---");
     let status = et_start(&xds)?;
     println!("  status = {status}");
 
-    // 5. Poll for data + convert to engineering units
-    println!("\n--- Step 5: Polling data (5 s) ---");
-    let start = std::time::Instant::now();
-    let mut total_samples = 0u32;
-    let mut buf = vec![0u8; ET_DATA_BUF_SIZE];
+    // 5. Poll for data — dump raw URBs to disk and compute current estimate.
+    //
+    // Sample-byte interpretation (verified against busy-loop + LED loads):
+    //   byte[0] = 0x70 (frame marker, constant)
+    //   byte[1] = sample-sequence counter, increments by `byte[2]` each frame
+    //             (i.e. byte[1] is the cumulative count of charge pulses;
+    //              byte[2] is the per-sample pulse delta for this frame)
+    //   byte[2] = pulses-since-last-sample for this frame
+    //   byte[3] = digital flags (0 in pure analog mode)
+    //
+    // The XDS110-ET DCDC delivers a fixed-charge pulse per increment, so
+    // per-second pulse rate × (1e6 / cal2) gives current in nA. cal2=10186
+    // is the placeholder pulled from REVERSE_ENGINEERING.md; replace once
+    // ET_Calibrate is working.
+    println!("\n--- Step 5: Polling data (5 s, raw dump) ---");
 
-    // EnergyTrace measures current by counting DC/DC converter charge pulses.
-    // The raw 4-byte samples from the probe are counter values. To convert:
-    //   1. Extract 24-bit signed sample (byte[2]<<16 | byte[1]<<8 | byte[0])
-    //   2. The sample has a constant baseline (0x70 = 112) in the LSB — this is
-    //      a fixed component, not measurement data.
-    //   3. Subtract the running baseline to isolate the actual pulse counts.
-    //   4. Apply calibration: current_nA = pulse_count * 1000000.0 / cal2
-    //
-    //   From GetCurrentInNA (libenergytracestandalone.so):
-    //     current_nA = (double)offset * 1000.0 * 1000.0 / calib_loads[index]
-    //   where cal2 = 10186 for this probe.
-    //
-    //   For ProcessAnalogSamples, the calibLine parameters should be:
-    //     line 0: slope = energy_per_pulse_conversion, offset = baseline
-    //     line 1: slope = high_range_conversion, offset = upper_threshold
-    let na_per_pulse = 1_000_000.0 / cal2;
-    let mut prev_16bit: u32 = 0;
-    let mut delta_sum: u64 = 0;
-    let mut delta_count: u32 = 0;
+    let raw_path = std::env::var("RAW_OUT").unwrap_or_else(|_| "/tmp/etrace_raw.bin".into());
+    let mut raw_file = std::fs::File::create(&raw_path)?;
+    use std::io::Write;
+
+    let start = std::time::Instant::now();
+    let mut buf = vec![0u8; ET_DATA_BUF_SIZE];
+    let mut total_bytes = 0u64;
+    let mut urb_count = 0u64;
+    let mut sample_count = 0u64;
+    let mut pulse_total = 0u64; // sum of byte[2] across all samples
     while start.elapsed() < Duration::from_secs(5) {
         match et_read_data(&xds, &mut buf, DATA_TIMEOUT) {
             Ok(0) => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(n) => {
-                // Skip first 8 bytes (timestamp header), process 4-byte samples
-                let payload = if n > 8 { &buf[8..n] } else { continue; };
-                // Only process if we have complete 4-byte chunks
-                let payload = &payload[..payload.len() - (payload.len() % 4)];
+                urb_count += 1;
+                total_bytes += n as u64;
+                raw_file.write_all(&buf[..n])?;
+
+                // First URB has an 8-byte timestamp header, subsequent URBs
+                // start directly at sample 0. Sample stride is 4 bytes.
+                let payload = if urb_count == 1 && n > 8 {
+                    &buf[8..n]
+                } else {
+                    &buf[..n]
+                };
                 for chunk in payload.chunks_exact(4) {
-                    let counter16 = (chunk[2] as u32) << 8 | (chunk[1] as u32);
-                    total_samples += 1;
-
-                    if prev_16bit > 0 && counter16 > prev_16bit && counter16 - prev_16bit < 0x100 {
-                        let delta = counter16 - prev_16bit;
-                        delta_sum += delta as u64;
-                        delta_count += 1;
+                    if chunk[0] != 0x70 {
+                        continue; // skip non-sample bytes
                     }
-                    prev_16bit = counter16;
+                    sample_count += 1;
+                    pulse_total += chunk[2] as u64;
+                }
 
-                    if total_samples <= 20 {
-                        println!(
-                            "  [{total_samples:4}] b=[{:02x} {:02x} {:02x} {:02x}] cnt16={counter16:4}",
-                            chunk[0], chunk[1], chunk[2], chunk[3],
-                        );
-                    }
+                if urb_count <= 2 {
+                    let preview = &buf[..n.min(48)];
+                    println!("  URB#{urb_count} {n} bytes: {:02x?}", preview);
                 }
             }
             Err(e) => {
@@ -486,20 +565,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let elapsed = start.elapsed().as_secs_f64();
+    let avg_pulses_per_sample = pulse_total as f64 / sample_count.max(1) as f64;
+    let pulse_rate_hz = pulse_total as f64 / elapsed;
+    let na_per_pulse = 1_000_000.0 / cal2;
+    let current_na = pulse_rate_hz * na_per_pulse;
+    let current_ua = current_na / 1_000.0; // nA → µA: divide by 1000 (NOT 1e6 — that was the previous bug)
     println!();
-    if delta_count > 0 {
-        let avg_delta = delta_sum as f64 / delta_count as f64;
-        let total_seconds = start.elapsed().as_secs_f64();
-        let pulse_rate_hz = avg_delta * total_samples as f64 / total_seconds;
-        println!("  Avg 16-bit counter delta: {avg_delta:.3} counts/sample");
-        println!("  Pulse rate: {pulse_rate_hz:.0} Hz");
-        let current_na = pulse_rate_hz * na_per_pulse;
-        println!("  Estimated current: {:.3} µA", current_na / 1_000_000.0);
-    }
-    println!("  Total raw samples: {total_samples}");
-    let total_seconds = start.elapsed().as_secs_f64();
-    println!("  Total samples: {total_samples} over {total_seconds:.1}s");
-    println!("  Sample rate: {:.0} Hz", total_samples as f64 / total_seconds);
+    println!("  URBs read       : {urb_count}");
+    println!("  Total bytes     : {total_bytes}");
+    println!("  Samples         : {sample_count}");
+    println!("  Avg sample rate : {:.0} Hz", sample_count as f64 / elapsed);
+    println!("  Pulse total     : {pulse_total}");
+    println!("  Pulses/sample   : {:.4}", avg_pulses_per_sample);
+    println!("  Pulses/sec      : {:.0}", pulse_rate_hz);
+    println!("  cal2 (placeholder) : {cal2}");
+    println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
+    println!("  Raw stream saved to: {raw_path}");
 
     // 6. ET_Stop
     println!("\n--- Step 6: Stop Collection ---");

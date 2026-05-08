@@ -4,3 +4,8 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# CCS Theia EnergyTrace capture output
+tools/energytrace/workspace/
+tools/energytrace/captures/*
+!tools/energytrace/captures/.gitkeep

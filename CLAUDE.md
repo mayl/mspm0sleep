@@ -69,6 +69,12 @@ This applies to builds, checks, and example compilation across the `embassy/` su
 
 _Add a brief overview of your project architecture_
 
+### Key Documents
+
+| File | Purpose |
+|------|---------|
+| `tools/energytrace/REVERSE_ENGINEERING.md` | USB protocol reverse engineering: libmsp430.so EnergyTrace API, XDS110 interrupt endpoint framing (`0x3e <type> 0d 01`), event record format (eventID=8: current/voltage/energy) |
+
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_

@@ -57,7 +57,9 @@
         {
           packages = {
             bd = inputs.beads.packages.${system}.bd;
-            energytrace-util = pkgsUnfree.callPackage ./nix/energytrace-util.nix { };
+            energytrace-util = pkgsUnfree.callPackage ./nix/energytrace-util.nix {
+              mspds-bin = pkgsUnfree.mspds-bin;
+            };
           } // pkgs.lib.optionalAttrs (ccs-theia != null) {
             ccs-theia = ccs-theia;
           };
@@ -76,10 +78,11 @@
           packages = with pkgs; [
             probe-rs-tools
             cargo-embassy
-            mspds-bin
             inputs.beads.packages.${system}.bd
             inputs.beads.packages.${system}.fish-completions
-          ] ++ lib.optional (energytrace-util != null) energytrace-util;
+            libusb1       # for direct USB access to XDS110 probe
+            pkg-config    # needed for libusb1 detection by rust build scripts
+          ] ++ lib.optional (config.packages.energytrace-util != null) config.packages.energytrace-util;
 
           enterShell = ''
             echo "use cargo embassy init <project-name> --chip <chip_name> to make a new project"

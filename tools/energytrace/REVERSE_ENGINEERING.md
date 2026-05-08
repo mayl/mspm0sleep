@@ -299,52 +299,73 @@ Interface 2 responds to standard CMSIS-DAP v2 protocol over bulk endpoints `0x02
 
 The first 8 bytes of each bulk_read from endpoint 0x87 are a timestamp header; actual 4-byte samples follow.
 
-### Current Conversion Formulas
+### Current Conversion (verified 2026-05-07 against busy-loop ± LED loads)
 
-EnergyTrace measures current by counting DC/DC converter charge pulses. The raw counter is NOT a direct ADC sample — it increments at a rate proportional to the load current.
+**Sample byte interpretation (CORRECTED — see below for what was wrong before):**
 
-**Step 1: Extract 16-bit counter**
-```rust
-let counter16 = (chunk[2] as u32) << 8 | (chunk[1] as u32);
+```
+4-byte sample layout:
+  byte[0] = 0x70 (frame marker, constant)
+  byte[1] = cumulative 10 kHz time-window counter (mod 256). NOT a current value.
+  byte[2] = number of DC/DC charge pulses delivered since the last record.
+  byte[3] = digital flags (0 in pure-analog mode)
 ```
 
-**Step 2: Compute per-sample delta**
-```rust
-let delta = counter16 - prev_counter16;  // delta per sample
+The probe self-decimates: at high current it emits ~1 record per 100 µs window
+with `byte[2]` ∈ {1, 2, 3, ...}; at low current it groups multiple windows into
+a single record (`byte[1]` jumps by N) and `byte[2]` is the pulse count over
+those N windows. Summing `byte[2]` across every record gives total pulses
+regardless of decimation, which is what the current calculation needs.
+
+**Conversion formula:**
+
 ```
-Sanity check: `delta > 0 && delta < 0x100` (reject wraparound or glitches).
-
-**Step 3: Calibration constant**
-From `ET_Calibrate(tickCount=0)`:
-- `cal2` = returned calibration value (e.g., 10186 for this probe)
-- `na_per_pulse = 1,000,000 / cal2` (nanoamps per DC/DC converter pulse)
-
-For cal2=10186: `na_per_pulse = 98.17 nA/pulse`
-
-**Step 4: Average pulse rate**
-```rust
-let avg_delta = delta_sum / delta_count;        // avg counts per sample
-let pulse_rate_hz = avg_delta * sample_rate_effective;  // pulses/sec
-```
-Where `sample_rate_effective` ~3028 Hz (despite 10 kHz setting, limited by bulk_read batching).
-
-**Step 5: Current in µA**
-```rust
-let current_na = pulse_rate_hz * na_per_pulse;
-let current_ua = current_na / 1_000_000.0;
+pulse_total_per_sec = sum(byte[2]) / measurement_seconds
+current_nA          = pulse_total_per_sec * 1_000_000 / cal2
+current_µA          = current_nA / 1_000           ← divide by 1000, not 1e6
 ```
 
-**Complete formula:**
-```
-current_µA = (avg_delta_counts/sample) * (effective_sample_rate_Hz) * 1_000_000 / cal2 / 1_000_000
-           = avg_delta * sample_rate_effective / cal2
-```
+For `cal2 = 10186` (placeholder; see calibration TODOs below).
 
-For a typical MSPM0L1306 in idle (STOP mode):
-- avg_delta ≈ 3.7 counts/sample
-- sample_rate ≈ 3028 Hz
-- cal2 = 10186
-- Result: ~1.10 µA
+**The 8-byte timestamp header is ONLY on the FIRST URB after ET_Start.**
+Subsequent URBs start with the first sample at byte 0. The previous code
+stripped 8 bytes from every URB, which corrupted alignment.
+
+**Verified readings (LP-MSPM0L1306 + busy-loop firmware, cal2=10186):**
+
+| Firmware                       | Pulses/sample | Pulses/sec | Estimated current |
+|---|---|---|---|
+| `et_calib_busy_loop`           | 1.00          | 2,498      | 245 µA            |
+| `et_calib_busy_loop_led`       | 1.27          | 11,434     | 1,122 µA          |
+| Δ (LED contribution)           |               | 8,936      | ~877 µA           |
+
+The 245 µA for active busy-loop matches the MSPM0L1306 RUN-mode current at
+the post-reset 4 MHz MCLK. The 877 µA LED delta is plausible for the
+LP-MSPM0L1306 LED1 series resistor (1 kΩ–3.3 kΩ).
+
+### Earlier-agent claim corrected
+
+Commit `c4c970c` claimed "verified ~1.1 µA idle". That was actually 1.1 **mA**;
+the print path divided by 1e6 to convert nA → µA when it should have divided
+by 1e3. The calibration math itself is approximately correct.
+
+### Calibration TODOs
+
+- `ET_Calibrate (cmd=0x1e)` with `tickCount=0` gets no response. The TI flow
+  loops over `EnergyTrace_LPRF::_CalibLoads`, calling `ET_Calibrate` with each
+  load's `tickCount`. Valid `tickCount` values are not yet known — they're
+  populated from a configuration source we have not located. Until that's
+  resolved, `cal2 = 10186` is a placeholder pulled from REVERSE_ENGINEERING
+  history; absolute readings are within order-of-magnitude but not calibrated.
+- The full TI flow uses TWO calibration lines `(slope, offset)` per
+  `_calibLine` and a `ProcessAnalogSamples` algorithm to convert raw samples
+  to energy pulses. The simple "sum byte[2]" path works for analog profiling
+  but does not match TI's full path.
+- `ET_DCDC_SetVcc(3300)` + `ET_DCDC_RestartMCU` were added based on the
+  disassembly of `EmulatorComm_XDS110::DCDCSetVcc/DCDCRestart`. They both
+  return status=0 but did not change the sample stream pattern, so the
+  default DCDC state on this XDS110v3 firmware appears to already supply
+  3.3 V to the target (matches SLAU869E's "fixed 3.3 V" claim).
 
 **Original GetCurrentInNA from libenergytracestandalone.so (0x3ed5e):**
 ```c
@@ -403,10 +424,42 @@ The `repro-cli` Rust binary (at `tools/energytrace/repro-cli/`) uses `rusb` for 
 ```bash
 nix develop .# --no-pure-eval
 cd tools/energytrace/repro-cli
-cargo run
+cargo run                            # measures with current firmware on target
+RAW_OUT=path/to/file.bin cargo run   # also dumps raw URB stream
+RANGE=1 cargo run                    # send ET_Setup_Range (no observable effect yet)
 ```
 
-The tool systematically probes all interface/endpoint combinations and reports responses. Add new probing strategies by editing `src/main.rs`.
+### Operational pitfalls
+
+- **probe-rs (CMSIS-DAP) and our ICDI session can't be back-to-back.** Once
+  probe-rs (e.g., `cargo run` flashing) talks to the probe on iface 2 in
+  CMSIS-DAP mode, ICDI commands time out until the probe is **physically
+  unplugged and replugged**. Test cycle: replug → flash → replug → measure.
+- **Do NOT call `libusb_reset_device()` on this XDS110v3 firmware.** It
+  removes the probe from the USB bus permanently until physical replug.
+- **A failed ICDI command (e.g., a timeout) stalls iface 2 OUT for the rest
+  of the session.** Replug to recover.
+- **Command ordering matters: `XDS_ConnectET (cmd=0x28)` MUST be the first
+  ICDI command sent.** This mirrors `XDS_Open` in `libjscxds110.so`, which
+  always sends Connect or ConnectET immediately after claiming interfaces.
+
+### Newly-decoded ICDI command bytes (from libjscxds110.so disassembly)
+
+| cmd  | name                   | cmd_len | resp_len | payload                                         |
+|---|---|---|---|---|
+| 0x01 | XDS_Connect            | 4       | 7        | (none)                                          |
+| 0x1d | ET_Setup               | 0xb     | 7        | mode(1) + dig_mode(1) + sample_rate(4 LE) + dig_enable(1) |
+| 0x1e | ET_Calibrate           | 6       | 0xf      | tickCount(2 LE); response: status(4) + cal1(4) + cal2(4) |
+| 0x1f | ET_Start               | 4       | 7        | (none)                                          |
+| 0x20 | ET_Stop                | 4       | 7        | (none)                                          |
+| 0x21 | ET_Cleanup             | 4       | 7        | (none)                                          |
+| 0x23 | ET_DCDC_PowerDownMCU   | 4       | 7        | (none)                                          |
+| 0x24 | ET_DCDC_SetVcc         | 6       | 7        | vcc_mv(2 LE)                                    |
+| 0x25 | ET_DCDC_RestartMCU     | 4       | 7        | (none)                                          |
+| 0x28 | XDS_ConnectET          | 4       | 7        | (none) — must be first command                  |
+| 0x30 | ET_Setup_Range         | 5       | 7        | range(1)                                        |
+| 0x31 | ET_Setup_Dig           | -       | -        | (not yet decoded)                               |
+| 0x46 | ET_HardwareInfo        | -       | -        | (not yet decoded)                               |
 
 ### libicdi_emu.so — The Real XDS110v3 Driver
 
