@@ -24,8 +24,12 @@
 //!      GetCurrentInNA(index) = offset * 1000000.0 / calib_loads[index]
 //!      where offset is the calibrated offset, calib_loads are from probe
 
+use plotters::prelude::*;
 use rusb::{Context, DeviceHandle, UsbContext};
 use std::time::Duration;
+
+/// Sample period of the EnergyTrace stream (1 / 10 kHz).
+const SAMPLE_PERIOD_S: f64 = 1.0e-4;
 
 const TI_VID: u16 = 0x0451;
 const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
@@ -162,15 +166,27 @@ fn icdi_send(xds: &Xds110Handle, packet: &IcdiPacket) -> Result<(), rusb::Error>
 }
 
 /// Drain any stale data from the IN endpoint with a short timeout; used to
-/// flush any residue from a prior session before issuing new commands.
+/// flush residue from a prior session before issuing new commands. Bounded
+/// so we don't spin forever if the probe is still actively streaming.
 fn drain_endpoint(xds: &Xds110Handle, ep: u8) {
     let mut tmp = [0u8; 4096];
-    loop {
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    let mut total: usize = 0;
+    while std::time::Instant::now() < deadline {
         match xds.handle.read_bulk(ep, &mut tmp, Duration::from_millis(50)) {
             Ok(0) => return,
-            Ok(n) => eprintln!("    [drain ep=0x{ep:02x}] discarded {n} bytes: {:02x?}", &tmp[..n.min(32)]),
+            Ok(n) => {
+                total += n;
+                if total >= 8 * 1024 {
+                    eprintln!("    [drain ep=0x{ep:02x}] still flowing after {total}B, giving up");
+                    return;
+                }
+            }
             Err(_) => return,
         }
+    }
+    if total > 0 {
+        eprintln!("    [drain ep=0x{ep:02x}] discarded {total} bytes total");
     }
 }
 
@@ -437,6 +453,133 @@ fn pulses_to_current_ua(pulses: i32, offset: f64, calib_load: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Plotting
+// ---------------------------------------------------------------------------
+
+/// Print a 60×20 ASCII line plot of the binned current series to stdout, so
+/// the shape is visible in terminal output without opening the SVG.
+fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal2: f64) {
+    if bin_pulses.is_empty() {
+        return;
+    }
+    const WIDTH: usize = 80;
+    const HEIGHT: usize = 18;
+    let bin_s = bin_ms / 1000.0;
+    let na_per_pulse = 1_000_000.0 / cal2;
+
+    // Resample to WIDTH columns by averaging.
+    let cols: Vec<f64> = (0..WIDTH)
+        .map(|c| {
+            let lo = c * bin_pulses.len() / WIDTH;
+            let hi = ((c + 1) * bin_pulses.len() / WIDTH).max(lo + 1);
+            let sum: u64 = bin_pulses[lo..hi.min(bin_pulses.len())].iter().sum();
+            let n = (hi - lo).max(1);
+            // pulses/sec across this bin range, then to µA.
+            (sum as f64 / (n as f64 * bin_s)) * na_per_pulse / 1_000.0
+        })
+        .collect();
+
+    let lo = cols.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = cols.iter().copied().fold(0.0f64, f64::max);
+    let span = (hi - lo).max(1.0);
+
+    println!("\n  Time-series ({} ms bins, {} columns over {:.2} s):", bin_ms as u64, WIDTH, bin_pulses.len() as f64 * bin_s);
+    println!("  {:>6} µA ┐", hi as i64);
+    let mut grid = vec![vec![' '; WIDTH]; HEIGHT];
+    for (c, &v) in cols.iter().enumerate() {
+        let row = HEIGHT - 1 - (((v - lo) / span * (HEIGHT - 1) as f64).round() as usize).min(HEIGHT - 1);
+        grid[row][c] = '*';
+    }
+    for row in &grid {
+        println!("            │{}", row.iter().collect::<String>());
+    }
+    println!("  {:>6} µA ┴{}", lo as i64, "─".repeat(WIDTH));
+    println!("            0{}{:>w$.1}s", " ".repeat(WIDTH - 6), bin_pulses.len() as f64 * bin_s, w = 5);
+}
+
+/// Compute the time-vs-current series from binned pulse counts.
+fn compute_series(bin_pulses: &[u64], bin_ms: f64, cal2: f64) -> Vec<(f64, f64)> {
+    let bin_s = bin_ms / 1000.0;
+    let na_per_pulse = 1_000_000.0 / cal2;
+    bin_pulses
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            let t = (i as f64 + 0.5) * bin_s;
+            let current_ua = (p as f64 / bin_s) * na_per_pulse / 1_000.0;
+            (t, current_ua)
+        })
+        .collect()
+}
+
+/// Compute (t_max, y_lo, y_hi) bounds for plotting.
+fn series_bounds(series: &[(f64, f64)]) -> (f64, f64, f64) {
+    let t_max = series.last().map(|&(t, _)| t).unwrap_or(1.0);
+    let i_max = series.iter().map(|&(_, c)| c).fold(0f64, f64::max);
+    let i_min = series.iter().map(|&(_, c)| c).fold(f64::INFINITY, f64::min);
+    let y_pad = (i_max - i_min).max(1.0) * 0.1;
+    (t_max, (i_min - y_pad).min(0.0), i_max + y_pad)
+}
+
+/// Render the line + 0-baseline onto the supplied drawing area. Caller chooses
+/// the backend (BitMapBackend for PNG, SVGBackend for SVG).
+fn draw_chart<DB: DrawingBackend>(
+    root: DrawingArea<DB, plotters::coord::Shift>,
+    series: &[(f64, f64)],
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let (t_max, y_lo, y_hi) = series_bounds(series);
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .margin(20)
+        .build_cartesian_2d(0f64..t_max, y_lo..y_hi)?;
+    chart
+        .configure_mesh()
+        .disable_x_axis()
+        .disable_y_axis()
+        .disable_x_mesh()
+        .disable_y_mesh()
+        .draw()?;
+    chart.draw_series(std::iter::once(PathElement::new(
+        vec![(0.0, 0.0), (t_max, 0.0)],
+        ShapeStyle::from(&BLACK.mix(0.2)),
+    )))?;
+    chart.draw_series(LineSeries::new(series.iter().copied(), &BLUE))?;
+    root.present()?;
+    Ok(())
+}
+
+/// Render to PNG and SVG side-by-side. Both share the same base path; the
+/// SVG path replaces .png with .svg (or appends .svg if the base has no
+/// extension).
+fn render_plot(
+    bin_pulses: &[u64],
+    bin_ms: f64,
+    cal2: f64,
+    out_path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if bin_pulses.is_empty() {
+        return Err("no data to plot".into());
+    }
+    let series = compute_series(bin_pulses, bin_ms, cal2);
+
+    // PNG (no text labels — plotters' default text path needs fontconfig).
+    let png_root = BitMapBackend::new(out_path, (1400, 480)).into_drawing_area();
+    draw_chart(png_root, &series)?;
+
+    // Same plot, SVG.
+    let svg_path = std::path::Path::new(out_path)
+        .with_extension("svg")
+        .to_string_lossy()
+        .into_owned();
+    let svg_root = SVGBackend::new(&svg_path, (1400, 480)).into_drawing_area();
+    draw_chart(svg_root, &series)?;
+    Ok(svg_path)
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -477,10 +620,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // physics — known LED current vs busy-loop delta — in a follow-up).
     let cal2: f64 = 10186.0; // placeholder from REVERSE_ENGINEERING.md; current calc is approximate
 
-    // 3. ET_Setup (analog profiling mode, 10 kHz samples)
+    // 3. ET_Setup (analog profiling mode, 10 kHz samples by default)
     println!("\n--- Step 3: Setup EnergyTrace ---");
     let mode: u8 = 0; // ET_PROFILING_ANALOG
-    let sample_rate: u32 = 10000;
+    let sample_rate: u32 = std::env::var("SAMPLE_RATE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10000);
     let dig_mode: u8 = 0;
     let dig_enable: u8 = 0;
     let status = et_setup(&xds, mode, sample_rate, dig_mode, dig_enable)?;
@@ -522,13 +668,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut raw_file = std::fs::File::create(&raw_path)?;
     use std::io::Write;
 
+    let duration_secs: u64 = std::env::var("DURATION_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    println!("  Capture duration: {duration_secs} s");
+
+    // Bin width for the time-series plot. 10 ms = 100 sample windows at 10 kHz.
+    let bin_ms: f64 = std::env::var("BIN_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    // Time-base for the binning is derived from the sample rate we requested
+    // in ET_Setup, not the default. byte[1] is a per-window counter at this
+    // rate.
+    let sample_period_s = 1.0 / (sample_rate as f64);
+    let windows_per_bin: u64 = ((bin_ms / 1000.0) / sample_period_s).round() as u64;
+
     let start = std::time::Instant::now();
     let mut buf = vec![0u8; ET_DATA_BUF_SIZE];
     let mut total_bytes = 0u64;
     let mut urb_count = 0u64;
     let mut sample_count = 0u64;
     let mut pulse_total = 0u64; // sum of byte[2] across all samples
-    while start.elapsed() < Duration::from_secs(5) {
+    // Time-binning state. byte[1] is a cumulative 10 kHz window counter (mod 256);
+    // we track the running window count by accumulating its delta on each record,
+    // handling the 256-wraparound. cum_windows × 100 µs = elapsed time.
+    let mut prev_b1: Option<u8> = None;
+    let mut cum_windows: u64 = 0;
+    let mut bin_pulses: Vec<u64> = Vec::new();
+    while start.elapsed() < Duration::from_secs(duration_secs) {
         match et_read_data(&xds, &mut buf, DATA_TIMEOUT) {
             Ok(0) => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -551,6 +720,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     sample_count += 1;
                     pulse_total += chunk[2] as u64;
+
+                    // Advance window counter by the byte[1] delta (mod 256).
+                    let b1 = chunk[1];
+                    let step = match prev_b1 {
+                        None => 1u64,
+                        Some(prev) => {
+                            let d = b1.wrapping_sub(prev);
+                            if d == 0 { 256 } else { d as u64 }
+                        }
+                    };
+                    cum_windows += step;
+                    prev_b1 = Some(b1);
+
+                    let bin_idx = (cum_windows / windows_per_bin) as usize;
+                    if bin_idx >= bin_pulses.len() {
+                        bin_pulses.resize(bin_idx + 1, 0);
+                    }
+                    bin_pulses[bin_idx] += chunk[2] as u64;
                 }
 
                 if urb_count <= 2 {
@@ -582,6 +769,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cal2 (placeholder) : {cal2}");
     println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
     println!("  Raw stream saved to: {raw_path}");
+
+    // Render time-vs-current plot via plotters (PNG — no text labels because
+    // plotters' default text path needs fontconfig; the ASCII summary
+    // printed below carries the numeric context).
+    let plot_path = std::env::var("PLOT_OUT").unwrap_or_else(|_| {
+        std::path::Path::new(&raw_path)
+            .with_extension("png")
+            .to_string_lossy()
+            .into_owned()
+    });
+    match render_plot(&bin_pulses, bin_ms, cal2, &plot_path) {
+        Err(e) => eprintln!("  plot render failed: {e}"),
+        Ok(svg_path) => {
+            println!("  Plot rendered to   : {plot_path}");
+            println!("  SVG version        : {svg_path}");
+        }
+    }
+    print_ascii_plot(&bin_pulses, bin_ms, cal2);
 
     // 6. ET_Stop
     println!("\n--- Step 6: Stop Collection ---");

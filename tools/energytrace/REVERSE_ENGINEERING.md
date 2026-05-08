@@ -367,6 +367,37 @@ by 1e3. The calibration math itself is approximately correct.
   default DCDC state on this XDS110v3 firmware appears to already supply
   3.3 V to the target (matches SLAU869E's "fixed 3.3 V" claim).
 
+### Empirical findings on ET_Setup parameters
+
+Tested against the LP-MSPM0L1306 running the embassy `blinky` example
+(50 % duty cycle, 800 ms period); same physical load throughout.
+
+**`sample_rate` argument of ET_Setup:**
+
+| sample_rate | Records/sec | byte[1] step | byte[2] avg | Mean reading | Notes |
+|---|---|---|---|---|---|
+| 10 000 | 5 340 | 1 | 1.14 | 599 µA | Default; clean |
+| 100 000 | 1 274 | ~40 | 1.00 | 126 µA | Capture stops after ~3.4 s; stream contains stray `0x5c` bytes mid-record that break 4-byte alignment |
+
+`sample_rate` mostly affects how `byte[1]` is interpreted as a time index.
+The probe's actual analog/USB-emit rate appears bounded around a few kHz
+of records regardless. Higher requested rates produce *less* useful data,
+not more. **Leave `sample_rate = 10000`.**
+
+**`ET_Setup_Range` (cmd=0x30):**
+
+| Setting | Records/sec | Pulses/sample | Mean | Peak (LED on) | Valley (LED off) |
+|---|---|---|---|---|---|
+| Don't send the command | 5 340 | 1.14 | 599 µA | ~1060 | ~135 |
+| `range = 0` | 3 476 | 1.11 | 378 µA | ~770 | ~75 |
+| `range = 1` | 3 464 | 1.11 | 377 µA | ~770 | ~75 |
+
+`range = 0` and `range = 1` produce essentially identical streams, both
+at half the record rate of the default. The shape is preserved in all
+cases. **Leave `ET_Setup_Range` unsent in the default flow** — the value
+of the argument doesn't matter, and sending the command at all costs
+record rate without obvious benefit.
+
 **Original GetCurrentInNA from libenergytracestandalone.so (0x3ed5e):**
 ```c
 double GetCurrentInNA(int64_t offset, int index) {
