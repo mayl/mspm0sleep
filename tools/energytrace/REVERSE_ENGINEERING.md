@@ -287,17 +287,13 @@ Interface 2 responds to standard CMSIS-DAP v2 protocol over bulk endpoints `0x02
 
 ### EnergyTrace Data Stream Format (XDS110v3 / 0451:bef3)
 
-**This is different from the libmsp430.so eventID=8 record format.** The XDS110v3 probe on interface 6 streams raw 4-byte samples, not framed event records:
+**This is different from the libmsp430.so eventID=8 record format.** The XDS110v3 probe on interface 6 streams raw 4-byte samples, not framed event records.
 
-```
-4-byte sample layout:
-  byte[0] = 0x70 (constant — indicator byte)
-  byte[1] = low byte of 16-bit DC/DC converter pulse counter
-  byte[2] = high byte of 16-bit counter (byte[2]<<8 | byte[1] = counter16)
-  byte[3] = digital flags (0 in analog profiling mode)
-```
-
-The first 8 bytes of each bulk_read from endpoint 0x87 are a timestamp header; actual 4-byte samples follow.
+> ⚠️ The "16-bit counter" layout once described here was an early guess and is
+> **superseded** by the verified layout in "Current Conversion" just below
+> (byte[1] = time-window counter, byte[2] = per-record pulse count). Kept only as
+> a pointer; do not implement against it. The 8-byte timestamp header appears on
+> the **first** URB after ET_Start only.
 
 ### Current Conversion (verified 2026-05-07 against busy-loop ± LED loads)
 
@@ -406,16 +402,103 @@ double GetCurrentInNA(int64_t offset, int index) {
 ```
 Where `calib_loads[0]` is `cal2` (the primary calibration load in µA).
 
-### ProcessAnalogSamples Algorithm
+### ProcessAnalogSamples Algorithm — does NOT apply to our stream
 
-At `0x44fe2` in libenergytracestandalone.so, the `ProcessAnalogSamples` function implements a different conversion path:
+At `0x44fe2` in libenergytracestandalone.so, `ProcessAnalogSamples` extracts a
+24-bit signed sample `(byte[2]<<16)|(byte[1]<<8)|byte[0]`, runs a `double`
+accumulator (`accumulator += sample - calibLine.offset`; emit
+`accumulator*calibLine.slope` and reset when `accumulator > 0`).
 
-1. Extract 24-bit signed sample: `(byte[2]<<16) | (byte[1]<<8) | byte[0]`, subtract 0x1000000 if > 0x7FFFFF
-2. Maintain a `double` accumulator at `this+0x318`
-3. For each sample: `accumulator += (sample - calibLine.offset)`
-4. When `accumulator > 0.0`: produce energy pulse count via `(accumulator * calibLine.slope) as i32`, then reset accumulator to 0
+**This is a different (MSP430 / older-probe) wire format and is NOT what the
+XDS110v3 streams on interface 6.** Theory "B" — interpreting our 4-byte sample
+as that 24-bit value — was disproven in beads mspm0sleep-a78.3: `byte[0]` is a
+constant `0x70` frame marker (it would be the *low* byte of a 24-bit sample and
+could not be constant), and the captures show `byte[2]` is a tiny pulse count
+(0–3), not a noisy current waveform. The verified decode for our probe is the
+"sum `byte[2]`" pulse-count method documented above. The dead `process_analog_samples`
+port has been removed from `repro-cli` (it implemented theory B).
 
-This produces energy pulses (for energy/µJ calculation), not instantaneous current. The 16-bit delta method above is a simpler approach that gives instantaneous current directly.
+### EnergyTrace Calibration Architecture (how TI gets absolute current)
+
+Decoded from `libenergytracestandalone.so` (`EnergyTrace_LPRF::*`) and
+`libjscxds110.so` (`ET_Calibrate`) — beads mspm0sleep-a78.4. This is the full
+path that turns raw pulse counts into calibrated current, and it explains why
+`repro-cli` is stuck at "order-of-magnitude" accuracy.
+
+**The one-shot `ET_Calibrate` (cmd 0x1e) response is tiny:**
+
+```
+response payload = status(u32 LE) + cal1(u32 LE) + cal2(u32 LE)   # framed len 0xf = 15
+```
+
+`cal1`/`cal2` are **unsigned 32-bit integers**, not floats. They are the *raw
+tick counts* the probe measured for one reference load, not a calibration line.
+(`EmulatorComm_XDS110::CalibrateTicks(u16 tickCount, u32* cal1, u32* cal2)` is a
+thin forwarder to `ET_Calibrate`.)
+
+**The calibration lines are built host-side, over MULTIPLE loads.**
+`EnergyTrace_LPRF::PerformCalibration()` (0x3ea02):
+
+```
+for i in 0 .. _CalibLoads.size():
+    tickCount = _CalibLoads[i].u16@+0x8           # per-load tick count
+    CalibrateTicks(tickCount, &cal1, &cal2)        # -> ET_Calibrate(0x1e)
+    point.x = (double)(int)cal1 / (double)cal2     # measured tick ratio
+    point.y = GetCurrentInNA(i)                     # KNOWN reference current for load i
+    calibPoints.push_back(point)
+for i in 0 .. n-1:
+    slope = (point[i+1].y - point[i].y) / (point[i+1].x - point[i].x)
+    calibLines.push_back({ slope, x0 = point[i].x })
+# then a fixup patches calibLines[1].offset using a 0x70-range constant
+```
+
+`GetCurrentInNA` (0x3ed5e) returns the *expected* current of reference load `i`
+(constants from `.rodata`: `×1000.0` twice → mA→nA; `DBL_MAX` is the
+invalid-load sentinel). So calibration is a **multi-point linear fit** of
+"measured tick ratio" → "known current", and the live decoder applies the
+resulting `calibLine` slopes to the streamed pulse counts.
+
+**Why we can't do this yet — the reference-load table is on the probe.**
+`_CalibLoads` (the `{reference current, tickCount}` table) is constructed
+**empty** in `EnergyTrace_LPRF::EnergyTrace_LPRF(...)` (obj+0x10) and filled
+externally via `SMG_LoadBoardData` — exported by `libxdsboard.so`, which reads
+`ccBoard%d.dat` from the **XDS110 probe's own EEPROM**, not from any disk file
+and not from the ICDI protocol. There is an `XDS_CreateFakeSMGHandle` fallback
+for the no-data case. This is exactly why `ET_Calibrate(tickCount=0)` hangs: we
+never loaded the probe's per-load tickCounts, so we're sending a tickCount the
+probe's calibration MCU doesn't recognize.
+
+**To reach ±10% absolute accuracy, one of:**
+1. Decode the SMG / board-data readout command, pull the probe's stored
+   `_CalibLoads`, drive `ET_Calibrate` with the real per-load tickCounts, and
+   implement the calibPoint→calibLine fit. (The faithful path; new RE.)
+2. Anchor `cal2` against a bench-known load (precise external resistor, or the
+   LaunchPad LED with a *measured* series resistor — see below).
+
+### Empirical cal2 anchoring from the LED load (and its limit)
+
+`cal2` in `repro-cli` has units **nA per (pulse/s)**: `current_nA = pulse_rate_hz
+· 1e6 / cal2`, so `cal2 = pulse_rate_hz · 1e6 / current_nA`. Because both the
+absolute reading and the LED-on−busy-loop *delta* scale with `1/cal2`, a known
+LED current pins `cal2` directly: `cal2 = Δpulse_rate · 1e6 / I_LED_nA`.
+
+From the a78.2 captures (busy-loop 2496 pulses/s, LED delta ≈ 8933 pulses/s) and
+a red LED on a 3.3 V GPIO (Vf 1.8–2.0 V), the unknown series resistor dominates:
+
+| R (Ω) | I_LED (µA) | derived cal2 | busy-loop @ that cal2 (µA) |
+|------:|-----------:|-------------:|---------------------------:|
+| 1000  | 1300–1500  | 5955–6872    | 363–419 |
+| 1500  | 867–1000   | 8933–10307   | 242–279 |
+| 2200  | 591–682    | 13102–15117  | 165–191 |
+| 3300  | 394–455    | 19653–22676  | 110–127 |
+
+So the LED-delta method only brackets `cal2` to ≈ 6000–22000 (a ~3.7× spread).
+The placeholder `cal2 = 10186` sits in the middle, implying R ≈ 1.5–1.7 kΩ and a
+~245 µA busy-loop RUN current — internally consistent and order-of-magnitude
+correct, but **not ±10%** without the exact `LED1` series resistor (the LP-MSPM0L1306
+BOM value; `LED1` is on `PA0` via jumper `J2`) or the probe's `_CalibLoads`.
+`repro-cli` now exposes `cal2` via the `CAL2` env var for re-anchoring once a
+real load value is known.
 
 | Interface | Type | Protocol | Responds? | Notes |
 |---|---|---|---|---|

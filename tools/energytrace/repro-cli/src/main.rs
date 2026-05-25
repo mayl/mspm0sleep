@@ -9,27 +9,41 @@
 //!   Response: [0x2a sync][len_lo][len_hi][status:4][payload...]
 //!
 //! Data stream (raw bulk_read on interface 6, ep 0x87 IN):
-//!   4-byte LE samples = raw DC/DC converter pulse counts
-//!   Byte[0..2] = 24-bit signed sample value
-//!   Byte[3] = digital flags (unused in analog mode)
+//!   4-byte sample, layout VERIFIED 2026-05-07 against busy-loop ± LED loads
+//!   (beads mspm0sleep-a78.3):
+//!     byte[0] = 0x70 (frame marker, constant)
+//!     byte[1] = cumulative 10 kHz time-window counter (mod 256) — NOT a value
+//!     byte[2] = DC/DC charge pulses delivered since the last record
+//!     byte[3] = digital flags (0 in pure-analog mode)
+//!   The probe self-decimates: summing byte[2] over all records gives total
+//!   pulses regardless of decimation. There is NO 24-bit signed sample here —
+//!   an earlier "(byte[2]<<16)|(byte[1]<<8)|byte[0]" interpretation (theory B)
+//!   was disproven by the captures (byte[0] is constant 0x70, not a low byte).
 //!
-//! Conversion pipeline (reverse-engineered from libenergytracestandalone.so):
-//!   1. Sample extraction: (byte[2]<<16) | (byte[1]<<8) | byte[0]
-//!      Sign adjustment if > 0x7FFFFF → subtract 0x1000000
-//!   2. Calibration: accumulator += (sample - calibLine.offset)
-//!      When accumulator exceeds threshold:
-//!      energy_pulses = accumulator * calibLine.slope
-//!      accumulator is reset
-//!   3. Current conversion:
-//!      GetCurrentInNA(index) = offset * 1000000.0 / calib_loads[index]
-//!      where offset is the calibrated offset, calib_loads are from probe
+//! Conversion:
+//!   pulse_rate_hz = sum(byte[2]) / measurement_seconds
+//!   current_nA    = pulse_rate_hz * 1_000_000 / cal2
+//!   current_µA    = current_nA / 1_000
+//!
+//! cal2 is the per-load calibration constant. TI obtains it by running
+//! ET_Calibrate against a table of reference loads (`_CalibLoads`) read from
+//! the probe's own EEPROM via SMG_LoadBoardData; that table is not available
+//! to us yet (see REVERSE_ENGINEERING.md §"EnergyTrace Calibration Architecture"
+//! and beads mspm0sleep-a78.4). Until then cal2 is anchored empirically from
+//! the known LaunchPad LED load — see CAL2 below.
 
 use plotters::prelude::*;
 use rusb::{Context, DeviceHandle, UsbContext};
 use std::time::Duration;
 
-/// Sample period of the EnergyTrace stream (1 / 10 kHz).
-const SAMPLE_PERIOD_S: f64 = 1.0e-4;
+/// Calibration constant: nanoamps per (pulse-per-second). The TI library
+/// derives this per target from the probe's on-EEPROM `_CalibLoads` table
+/// (read via SMG_LoadBoardData) — see REVERSE_ENGINEERING.md §"EnergyTrace
+/// Calibration Architecture". We don't have that table yet, so cal2 is anchored
+/// empirically: with a known LaunchPad load (LED1 through its series resistor)
+/// the LED-on − busy-loop pulse-rate delta pins `cal2 = Δpulses_per_s · 1e6 /
+/// I_led_nA`. Override at runtime with the CAL2 env var while iterating.
+const DEFAULT_CAL2: f64 = 10186.0;
 
 const TI_VID: u16 = 0x0451;
 const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
@@ -302,6 +316,12 @@ fn dap_reset(xds: &Xds110Handle) {
 // EnergyTrace API
 // ---------------------------------------------------------------------------
 
+/// Run one ET_Calibrate (cmd=0x1e) with a single tickCount. Kept (not wired
+/// into the default flow) because driving it correctly needs the probe's
+/// per-load tickCount table; see beads mspm0sleep-a78.4 / the SMG_LoadBoardData
+/// notes in REVERSE_ENGINEERING.md. Response payload is status(u32) + cal1(u32)
+/// + cal2(u32) — verified against CalibrateTicks in libenergytracestandalone.so.
+#[allow(dead_code)]
 fn et_calibrate(
     xds: &Xds110Handle,
     tick_count: u16,
@@ -428,89 +448,14 @@ fn et_read_data(
 // ET record parsing
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
-#[derive(Debug, Default)]
-struct EtEvent {
-    timestamp_us: u64,
-    current_na: u32,
-    voltage_mv: u16,
-    energy_01uj: u32, // 0.1 microjoule units
-}
-
-/// DecodeStateMachineLPRF-compatible analog sample processor.
-///
-/// Matches the algorithm at `ProcessAnalogSamples` (0x44fe2 in
-/// libenergytracestandalone.so):
-///
-///   1. Extract 24-bit signed sample from each 4-byte chunk:
-///      `(byte[2]<<16) | (byte[1]<<8) | byte[0]`
-///      Subtract 0x1000000 if value > 0x7FFFFF
-///   2. Accumulate `(sample - calibLine.offset)` in a double accumulator
-///   3. When accumulator > 0, produce an energy pulse count:
-///      `pulses = (int)(accumulator * calibLine.slope)`
-///   4. Accumulator is then reset
-///
-/// Returns (sample_values, energy_pulse_counts) for each 4-byte chunk.
-#[allow(dead_code)]
-fn process_analog_samples(
-    data: &[u8],
-    calib_lines: &[(f64, f64)], // [(slope, offset), ...]
-) -> Vec<(i32, i32)> {
-    let mut results = Vec::new();
-    if calib_lines.is_empty() {
-        return results;
-    }
-    let mut accumulator: f64 = 0.0;
-
-    for chunk in data.chunks_exact(4) {
-        // 24-bit signed extraction (byte[0], byte[1], byte[2])
-        let raw = (chunk[2] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[0] as u32;
-        let sample = if raw > 0x7FFFFF {
-            (raw.wrapping_sub(0x1000000)) as i32
-        } else {
-            raw as i32
-        };
-        let _dig_flags = chunk[3]; // byte[3] = digital flags (unused in analog mode)
-
-        // Select calibration line: line[0] is used unless
-        // sample exceeds calibLines[1].offset
-        let calib = if calib_lines.len() > 1 && (sample as f64) > calib_lines[1].1 {
-            &calib_lines[1]
-        } else {
-            &calib_lines[0]
-        };
-
-        // Accumulate: accumulator += (sample - calibLine.offset)
-        accumulator += sample as f64 - calib.1;
-
-        // When accumulator exceeds 0, produce energy pulse count
-        let energy_pulses = if accumulator > 0.0 {
-            let pulses = (accumulator * calib.0) as i32;
-            accumulator = 0.0;
-            pulses
-        } else {
-            0
-        };
-
-        results.push((sample, energy_pulses));
-    }
-
-    results
-}
-
-/// Convert pulse counts to current (microamps) using the
-/// EnergyTrace_LPRF::GetCurrentInNA formula:
-///   current_nA = offset * 1_000_000.0 / calib_load
-/// where calib_load is determined from calibration data.
-#[allow(dead_code)]
-fn pulses_to_current_ua(pulses: i32, offset: f64, calib_load: f64) -> f64 {
-    if calib_load == 0.0 {
-        return 0.0;
-    }
-    let current_na = offset * 1_000_000.0 / calib_load;
-    // Scale pulses by current and convert to µA
-    pulses as f64 * current_na / 1_000_000.0
-}
+// NOTE: the libmsp430 "eventID=8" record struct and the 24-bit-signed
+// `ProcessAnalogSamples` accumulator path that used to live here have been
+// removed. Neither applies to the XDS110v3 iface-6 stream: that stream is the
+// already-decimated `byte[2]` pulse-count format documented at the top of this
+// file and verified in beads mspm0sleep-a78.3. The TI accumulator path decodes
+// a different (MSP430/older-probe) wire format. See REVERSE_ENGINEERING.md
+// §"EnergyTrace Calibration Architecture" for the full TI calibration flow and
+// why it needs the probe's on-EEPROM `_CalibLoads` table.
 
 // ---------------------------------------------------------------------------
 // Plotting
@@ -684,7 +629,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // from this XDS110v3 firmware. Streaming raw data still works without
     // it; we just lose the µA conversion factor (we'll recover it from
     // physics — known LED current vs busy-loop delta — in a follow-up).
-    let cal2: f64 = 10186.0; // placeholder from REVERSE_ENGINEERING.md; current calc is approximate
+    // cal2: nA per (pulse/s). Empirically anchored (see DEFAULT_CAL2); override
+    // with CAL2 while re-deriving against a known load.
+    let cal2: f64 = std::env::var("CAL2")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CAL2);
+    println!("  cal2 = {cal2} nA per (pulse/s) {}",
+        if std::env::var("CAL2").is_ok() { "(CAL2 override)" } else { "(default — see DEFAULT_CAL2)" });
 
     // 3. ET_Setup (analog profiling mode, 10 kHz samples by default)
     println!("\n--- Step 3: Setup EnergyTrace ---");
@@ -832,7 +784,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Pulse total     : {pulse_total}");
     println!("  Pulses/sample   : {:.4}", avg_pulses_per_sample);
     println!("  Pulses/sec      : {:.0}", pulse_rate_hz);
-    println!("  cal2 (placeholder) : {cal2}");
+    println!("  cal2 (nA per pulse/s): {cal2}");
     println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
     println!("  Raw stream saved to: {raw_path}");
 
