@@ -9,3 +9,13 @@
 tools/energytrace/workspace/
 tools/energytrace/captures/*
 !tools/energytrace/captures/.gitkeep
+
+# Rust build output (repro-cli)
+tools/energytrace/repro-cli/target/
+
+# Nix build symlink
+/result
+
+# Claude Code local/runtime state (machine-specific)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
