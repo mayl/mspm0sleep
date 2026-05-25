@@ -55,12 +55,14 @@ bd close <id>         # Complete work
 All Cargo commands must be run inside the Nix development shell to ensure the correct Rust toolchain and cross-compilation targets are available:
 
 ```bash
-# Run cargo via nix develop (recommended; --no-pure-eval needed for devenv)
-nix develop .# --no-pure-eval --command cargo check --features mspm0l1306rhb
+# Run cargo via nix develop (recommended)
+nix develop .# --command cargo check --features mspm0l1306rhb
 
 # Or enter the shell interactively
-nix develop .# --no-pure-eval
+nix develop .#
 cargo check --features mspm0l1306rhb
+
+# With direnv, the shell loads automatically on `cd` (see .envrc)
 ```
 
 This applies to builds, checks, and example compilation across the `embassy/` subtree.

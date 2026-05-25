@@ -29,14 +29,14 @@ nix eval 'nixpkgs#mspds-bin.outPath'
 
 The dynamic symbols of libmsp430.so are examined with:
 ```bash
-nix develop .# --no-pure-eval --command bash -c 'objdump -T <PATH>/lib/libmsp430.so'
+nix develop .# --command bash -c 'objdump -T <PATH>/lib/libmsp430.so'
 ```
 
 ### Binary Analysis Commands
 
 All analysis of libmsp430.so requires entering the Nix dev shell first:
 ```bash
-nix develop .# --no-pure-eval
+nix develop .#
 # then within the shell:
 objdump -T /nix/store/.../lib/libmsp430.so       # dynamic symbols
 objdump -d /nix/store/.../lib/libmsp430.so       # full disassembly
@@ -453,7 +453,7 @@ The sequence is:
 The `repro-cli` Rust binary (at `tools/energytrace/repro-cli/`) uses `rusb` for direct libusb access to the probe. Build and run:
 
 ```bash
-nix develop .# --no-pure-eval
+nix develop .#
 cd tools/energytrace/repro-cli
 cargo run                            # measures with current firmware on target
 RAW_OUT=path/to/file.bin cargo run   # also dumps raw URB stream

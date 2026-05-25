@@ -2,41 +2,22 @@
   description = "Template Embassy Project";
 
   inputs = {
-    devenv-root = {
-      url = "file+file:///dev/null";
-      flake = false;
-    };
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    devenv.url = "github:cachix/devenv";
-    devenv.inputs.nixpkgs.follows = "nixpkgs";
-    mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     beads.url = "github:gastownhall/beads";
     beads.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  nixConfig = {
-    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=";
-    extra-substituters = "https://devenv.cachix.org";
-  };
-
-  outputs = inputs@{ flake-parts, devenv-root, ... }:
+  outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      imports = [
-        inputs.devenv.flakeModule
-      ];
       systems = [ "x86_64-linux" "aarch64-linux" ];
 
       perSystem = { config, lib, self', inputs', pkgs, system, ... }:
         let
           # A local nixpkgs that allows specific unfree TI packages.
-          # Kept separate from the main `pkgs` so devenv continues
-          # to see a stock nixpkgs.
           pkgsUnfree = import inputs.nixpkgs {
             inherit system;
             config.allowUnfreePredicate = pkg:
@@ -53,6 +34,26 @@
             then pkgsUnfree.callPackage ./nix/ccs-theia.nix { }
             else null;
 
+          # Rust toolchain built with fenix: stable components + the
+          # Cortex-M cross-compilation targets, plus a standalone
+          # rust-analyzer.
+          fenixPkgs = inputs.fenix.packages.${system};
+          rustTargets = [
+            "thumbv6m-none-eabi"
+            "thumbv7m-none-eabi"
+            "thumbv7em-none-eabi"
+          ];
+          rustToolchain = fenixPkgs.combine ([
+            (fenixPkgs.stable.withComponents [
+              "rustc"
+              "cargo"
+              "clippy"
+              "rustfmt"
+              "rust-src"
+            ])
+            fenixPkgs.rust-analyzer
+          ] ++ map (t: fenixPkgs.targets.${t}.stable.rust-std) rustTargets);
+
         in
         {
           packages = {
@@ -64,50 +65,25 @@
             ccs-theia = ccs-theia;
           };
 
-        devenv.shells.default = {
-          devenv.root =
-            let
-              devenvRootFileContent = builtins.readFile devenv-root.outPath;
-            in
-            pkgs.lib.mkIf (devenvRootFileContent != "") devenvRootFileContent;
+          devShells.default = pkgs.mkShell {
+            name = "embassy.rs devshell";
 
-          name = "embassy.rs devshell";
+            packages = [ rustToolchain ] ++ (with pkgs; [
+              probe-rs-tools
+              cargo-embassy
+              inputs.beads.packages.${system}.bd
+              inputs.beads.packages.${system}.fish-completions
+              libusb1       # for direct USB access to XDS110 probe
+              pkg-config    # needed for libusb1 detection by rust build scripts
+            ]) ++ lib.optional (config.packages.energytrace-util != null)
+              config.packages.energytrace-util;
 
-          imports = [ ];
-
-          packages = with pkgs; [
-            probe-rs-tools
-            cargo-embassy
-            inputs.beads.packages.${system}.bd
-            inputs.beads.packages.${system}.fish-completions
-            libusb1       # for direct USB access to XDS110 probe
-            pkg-config    # needed for libusb1 detection by rust build scripts
-          ] ++ lib.optional (config.packages.energytrace-util != null) config.packages.energytrace-util;
-
-          enterShell = ''
-            echo "use cargo embassy init <project-name> --chip <chip_name> to make a new project"
-          '';
-
-          languages.rust = {
-            enable = true;
-            channel = "stable";
-            components = [
-              "rustc"
-              "cargo"
-              "clippy"
-              "rustfmt"
-              "rust-analyzer"
-              "rust-src"
-            ];
-            targets = [
-              "thumbv6m-none-eabi"
-              "thumbv7m-none-eabi"
-              "thumbv7em-none-eabi"
-            ];
+            shellHook = ''
+              echo "use cargo embassy init <project-name> --chip <chip_name> to make a new project"
+            '';
           };
         };
 
-      };
       flake = { };
     };
 }
