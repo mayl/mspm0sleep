@@ -79,6 +79,12 @@
               config.packages.energytrace-util;
 
             shellHook = ''
+              # repro-cli links libusb-1.0 dynamically with no rpath; the plain
+              # mkShell (post devenv migration) does not export a library path,
+              # so the built binary fails at runtime with
+              # "libusb-1.0.so.0: cannot open shared object file". Put libusb on
+              # the loader path explicitly.
+              export LD_LIBRARY_PATH="${pkgs.libusb1}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
               echo "use cargo embassy init <project-name> --chip <chip_name> to make a new project"
             '';
           };

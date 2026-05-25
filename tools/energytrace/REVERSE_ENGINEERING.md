@@ -462,10 +462,15 @@ RANGE=1 cargo run                    # send ET_Setup_Range (no observable effect
 
 ### Operational pitfalls
 
-- **probe-rs (CMSIS-DAP) and our ICDI session can't be back-to-back.** Once
-  probe-rs (e.g., `cargo run` flashing) talks to the probe on iface 2 in
-  CMSIS-DAP mode, ICDI commands time out until the probe is **physically
-  unplugged and replugged**. Test cycle: replug → flash → replug → measure.
+- **probe-rs (CMSIS-DAP) and our ICDI session CAN now be back-to-back.**
+  Iface 2 carries both CMSIS-DAP v2 and the TI ICDI/ET vendor framing on the
+  same bulk endpoints. probe-rs (`cargo run` flashing) leaves the DAP state
+  machine "connected", which used to make the ICDI commands time out until a
+  physical replug. repro-cli now sends a CMSIS-DAP `DAP_Disconnect` (cmd 0x03)
+  at startup (`dap_reset()`, Step 0) to clear that state, so the cycle is just:
+  flash → measure, **no replug** (verified 2026-05-25 — DAP_Disconnect replies
+  `[03 00]`, all subsequent ICDI commands return status 0). Skip with
+  `SKIP_DAP_RESET=1`. See mspm0sleep-a78.6.
 - **Do NOT call `libusb_reset_device()` on this XDS110v3 firmware.** It
   removes the probe from the USB bus permanently until physical replug.
 - **A failed ICDI command (e.g., a timeout) stalls iface 2 OUT for the rest

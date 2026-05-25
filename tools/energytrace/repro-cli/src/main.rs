@@ -55,6 +55,13 @@ const EP_CMD_OUT: u8 = 0x02;
 const DATA_IFACE: u8 = 6;
 const EP_DATA_IN: u8 = 0x87;
 
+// CMSIS-DAP v2 commands. Interface 2 carries BOTH CMSIS-DAP v2 and the TI
+// ICDI/ET vendor framing on the same bulk endpoints (0x02 OUT / 0x83 IN).
+// These are raw single-byte commands — no ICDI 0x2a framing — used only to
+// clear the DAP state probe-rs leaves behind after flashing. See
+// REVERSE_ENGINEERING.md §"CMSIS-DAP v2 Interface" and beads mspm0sleep-a78.6.
+const DAP_DISCONNECT: u8 = 0x03;
+
 const MAX_BUF_SIZE: usize = 0x1100; // 4352
 const ET_DATA_BUF_SIZE: usize = 0x186a0; // 100000, same as TI's polling loop
 const CMD_TIMEOUT: Duration = Duration::from_millis(4000);
@@ -140,8 +147,9 @@ fn open_xds110() -> Result<Xds110Handle, Box<dyn std::error::Error>> {
 
     // NOTE: do not call handle.reset() — on this XDS110v3 firmware libusb_reset_device
     // disappears the probe from the USB bus and a physical replug is required to
-    // recover. After running probe-rs (CMSIS-DAP), a manual replug is currently
-    // needed before ICDI commands work; see beads epic mspm0sleep-a78.
+    // recover. After running probe-rs (CMSIS-DAP) the probe is left "connected";
+    // dap_reset() (called from main) clears that with a DAP_Disconnect so no
+    // physical replug is needed between flash and measure. See mspm0sleep-a78.6.
 
     // Claim both interfaces up front (mirrors libjscxds110.so:_InitializeICDIDeviceBySerial,
     // which always claims iface 2 then iface 6 before any ICDI command is sent).
@@ -236,6 +244,58 @@ fn icdi_execute(
         return Ok(status);
     }
     Err("XDS_Execute: all retries exhausted".into())
+}
+
+// ---------------------------------------------------------------------------
+// CMSIS-DAP state reset
+// ---------------------------------------------------------------------------
+
+/// Send one raw CMSIS-DAP v2 command on interface 2 and read its reply.
+/// Best-effort: the command is one byte, the reply is `[cmd, status, ...]`.
+/// A timeout is reported but not fatal — on a freshly-replugged probe there is
+/// no DAP connection to tear down, so a missing/negative reply is expected and
+/// harmless.
+fn dap_command(xds: &Xds110Handle, cmd: &[u8], label: &str) -> Option<Vec<u8>> {
+    if let Err(e) = xds.handle.write_bulk(EP_CMD_OUT, cmd, CMD_TIMEOUT) {
+        eprintln!("    [DAP {label}] write failed: {e}");
+        return None;
+    }
+    let mut rx = [0u8; 64];
+    match xds.handle.read_bulk(EP_CMD_IN, &mut rx, CMD_TIMEOUT) {
+        Ok(n) => {
+            println!("    [DAP {label}] reply {n}B: {:02x?}", &rx[..n]);
+            Some(rx[..n].to_vec())
+        }
+        Err(rusb::Error::Timeout) => {
+            println!("    [DAP {label}] no reply (timeout) — probe was likely already idle");
+            None
+        }
+        Err(e) => {
+            eprintln!("    [DAP {label}] read failed: {e}");
+            None
+        }
+    }
+}
+
+/// Return the XDS110 to a clean state after probe-rs CMSIS-DAP flashing.
+///
+/// probe-rs talks CMSIS-DAP v2 on interface 2 and, when it exits, leaves the
+/// probe's debug-port state machine "connected". The TI ICDI/ET vendor
+/// commands (XDS_ConnectET, ET_Setup, …) sent on the same endpoints then time
+/// out until the probe is physically unplugged and replugged. Issuing a
+/// CMSIS-DAP `DAP_Disconnect` (cmd 0x03) here tears that connection down so the
+/// vendor framing is accepted again — no replug. See beads mspm0sleep-a78.6.
+///
+/// Skippable via `SKIP_DAP_RESET=1` for debugging the raw fresh-replug path.
+fn dap_reset(xds: &Xds110Handle) {
+    if std::env::var("SKIP_DAP_RESET").is_ok() {
+        println!("  SKIP_DAP_RESET set — not sending DAP_Disconnect");
+        return;
+    }
+    println!("  DAP_Disconnect (cmd=0x03) to clear probe-rs CMSIS-DAP state...");
+    dap_command(xds, &[DAP_DISCONNECT], "Disconnect");
+    // Flush any DAP reply residue before the ICDI vendor commands take over.
+    drain_endpoint(xds, EP_CMD_IN);
 }
 
 // ---------------------------------------------------------------------------
@@ -590,10 +650,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Flow mirrors XDS_Open + EnergyTrace_LPRF::InitEnergyTrace from
     // libjscxds110.so / libenergytracestandalone.so:
-    //   1. XDS_ConnectET   — must be the FIRST command on the wire
+    //   0. DAP_Disconnect  — clear any CMSIS-DAP state left by probe-rs
+    //   1. XDS_ConnectET   — must be the FIRST ICDI command on the wire
     //   2. ET_Calibrate    — performed inside InitEnergyTrace::PerformCalibration
     //   3. ET_Setup
     //   4. ET_Start
+
+    // 0. Clear probe-rs CMSIS-DAP state so ICDI works without a physical
+    // replug. No-op on a freshly-replugged probe. See mspm0sleep-a78.6.
+    println!("\n--- Step 0: Reset CMSIS-DAP state ---");
+    dap_reset(&xds);
 
     // 1. XDS_ConnectET (must come first; XDS_Open in the TI library always
     // sends this immediately after claiming interfaces 2 and 6).
