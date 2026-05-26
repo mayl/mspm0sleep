@@ -650,19 +650,67 @@ fn et_read_data(
 // why it needs the probe's on-EEPROM `_CalibLoads` table.
 
 // ---------------------------------------------------------------------------
+// Calibration model
+// ---------------------------------------------------------------------------
+
+/// Affine EnergyTrace current calibration: `current_nA = slope·(pulse_rate) −
+/// baseline`, where `pulse_rate` is in pulses/second.
+///
+/// Today this carries a single calibration point read live from the probe via
+/// ET_Calibrate (cmd 0x1e, beads mspm0sleep-dln):
+///   * `na_per_pps`  = `1e6 / cal2` — TI's GetCurrentInNA scale (cal2 ≈ 10186).
+///   * `baseline_na` = `cal1 · na_per_pps` — the zero-load pedestal. cal1 is the
+///     settling offset ET_Calibrate returns alongside cal2 (≈ 17 at the
+///     tickCount=1000 we use). Subtracting it removes the DC/DC quiescent
+///     baseline that the previous through-origin model left in every reading.
+///
+/// The baseline is a single-point assumption (cal1 in cal2's normalised pulse
+/// scale) pending bench validation against a known load — see bead
+/// mspm0sleep-nvd step 3, and `CAL1=0` to disable it. Step 2 will generalise
+/// this to TI's per-segment `_calibLine` fit (slope + offset between adjacent
+/// reference loads) once known reference currents are available.
+#[derive(Clone, Copy)]
+struct Calib {
+    /// nA per (pulse/second) — TI's `1e6 / cal2` scale.
+    na_per_pps: f64,
+    /// Zero-load pedestal in nA, subtracted before reporting (from cal1).
+    baseline_na: f64,
+}
+
+impl Calib {
+    fn from_cal(cal1: f64, cal2: f64) -> Self {
+        let na_per_pps = 1_000_000.0 / cal2;
+        Self {
+            na_per_pps,
+            baseline_na: cal1 * na_per_pps,
+        }
+    }
+
+    /// Convert a pulse rate (pulses/second) to current in nA, clamped ≥ 0 (the
+    /// pedestal must never push a reading negative).
+    fn current_na(&self, pulses_per_sec: f64) -> f64 {
+        (pulses_per_sec * self.na_per_pps - self.baseline_na).max(0.0)
+    }
+
+    /// Same as [`current_na`], expressed in µA.
+    fn current_ua(&self, pulses_per_sec: f64) -> f64 {
+        self.current_na(pulses_per_sec) / 1_000.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plotting
 // ---------------------------------------------------------------------------
 
 /// Print a 60×20 ASCII line plot of the binned current series to stdout, so
 /// the shape is visible in terminal output without opening the SVG.
-fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal2: f64) {
+fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal: &Calib) {
     if bin_pulses.is_empty() {
         return;
     }
     const WIDTH: usize = 80;
     const HEIGHT: usize = 18;
     let bin_s = bin_ms / 1000.0;
-    let na_per_pulse = 1_000_000.0 / cal2;
 
     // Resample to WIDTH columns by averaging.
     let cols: Vec<f64> = (0..WIDTH)
@@ -671,8 +719,8 @@ fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal2: f64) {
             let hi = ((c + 1) * bin_pulses.len() / WIDTH).max(lo + 1);
             let sum: u64 = bin_pulses[lo..hi.min(bin_pulses.len())].iter().sum();
             let n = (hi - lo).max(1);
-            // pulses/sec across this bin range, then to µA.
-            (sum as f64 / (n as f64 * bin_s)) * na_per_pulse / 1_000.0
+            // pulses/sec across this bin range, then to µA via the calibration.
+            cal.current_ua(sum as f64 / (n as f64 * bin_s))
         })
         .collect();
 
@@ -695,15 +743,14 @@ fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal2: f64) {
 }
 
 /// Compute the time-vs-current series from binned pulse counts.
-fn compute_series(bin_pulses: &[u64], bin_ms: f64, cal2: f64) -> Vec<(f64, f64)> {
+fn compute_series(bin_pulses: &[u64], bin_ms: f64, cal: &Calib) -> Vec<(f64, f64)> {
     let bin_s = bin_ms / 1000.0;
-    let na_per_pulse = 1_000_000.0 / cal2;
     bin_pulses
         .iter()
         .enumerate()
         .map(|(i, &p)| {
             let t = (i as f64 + 0.5) * bin_s;
-            let current_ua = (p as f64 / bin_s) * na_per_pulse / 1_000.0;
+            let current_ua = cal.current_ua(p as f64 / bin_s);
             (t, current_ua)
         })
         .collect()
@@ -754,13 +801,13 @@ where
 fn render_plot(
     bin_pulses: &[u64],
     bin_ms: f64,
-    cal2: f64,
+    cal: &Calib,
     out_path: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if bin_pulses.is_empty() {
         return Err("no data to plot".into());
     }
-    let series = compute_series(bin_pulses, bin_ms, cal2);
+    let series = compute_series(bin_pulses, bin_ms, cal);
 
     // PNG (no text labels — plotters' default text path needs fontconfig).
     let png_root = BitMapBackend::new(out_path, (1400, 480)).into_drawing_area();
@@ -946,27 +993,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // model (current_nA = pulses · 1e6 / cal2), so we read it straight from the
     // probe instead of hardcoding. tickCount=1000 is in the settled region and
     // returns gracefully (no iface stall). CAL2 env still overrides.
-    println!("\n--- Step 2: Calibrate (read cal2 from probe) ---");
-    let cal2: f64 = if let Ok(s) = std::env::var("CAL2") {
-        let v = s.parse().unwrap_or(DEFAULT_CAL2);
-        println!("  cal2 = {v} nA per (pulse/s) (CAL2 override)");
-        v
+    println!("\n--- Step 2: Calibrate (read cal1/cal2 from probe) ---");
+    let (cal1, cal2): (f64, f64) = if let Ok(s) = std::env::var("CAL2") {
+        let c2 = s.parse().unwrap_or(DEFAULT_CAL2);
+        // No live calibration in override mode, so there is no live offset:
+        // default cal1 to 0 (CAL1 below can still set one explicitly).
+        println!("  cal2 = {c2} nA per (pulse/s) (CAL2 override); cal1 defaults to 0");
+        (0.0, c2)
     } else {
         match et_calibrate_once(&xds, 1000) {
-            Ok(Some((cal1, c2))) => {
-                println!("  ET_Calibrate → cal1(offset)={cal1}, cal2(scale)={c2}; using live cal2");
-                c2 as f64
+            Ok(Some((c1, c2))) => {
+                println!("  ET_Calibrate → cal1(offset)={c1}, cal2(scale)={c2}");
+                (c1 as f64, c2 as f64)
             }
             Ok(None) => {
-                eprintln!("  ET_Calibrate refused (non-zero status); falling back to DEFAULT_CAL2={DEFAULT_CAL2}");
-                DEFAULT_CAL2
+                eprintln!("  ET_Calibrate refused (non-zero status); falling back to DEFAULT_CAL2={DEFAULT_CAL2}, cal1=0");
+                (0.0, DEFAULT_CAL2)
             }
             Err(e) => {
-                eprintln!("  ET_Calibrate failed ({e}); falling back to DEFAULT_CAL2={DEFAULT_CAL2}");
-                DEFAULT_CAL2
+                eprintln!("  ET_Calibrate failed ({e}); falling back to DEFAULT_CAL2={DEFAULT_CAL2}, cal1=0");
+                (0.0, DEFAULT_CAL2)
             }
         }
     };
+    // CAL1 env overrides the offset (e.g. CAL1=0 disables the baseline
+    // subtraction entirely, reverting to the through-origin model).
+    let cal1 = std::env::var("CAL1")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(cal1);
+    let cal = Calib::from_cal(cal1, cal2);
+    println!(
+        "  → baseline = {:.1} nA ({:.3} µA) subtracted from decoded current (cal1·1e6/cal2)",
+        cal.baseline_na,
+        cal.baseline_na / 1_000.0
+    );
 
     // 3. ET_Setup (analog profiling mode, 10 kHz samples by default)
     println!("\n--- Step 3: Setup EnergyTrace ---");
@@ -1103,8 +1164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = start.elapsed().as_secs_f64();
     let avg_pulses_per_sample = pulse_total as f64 / sample_count.max(1) as f64;
     let pulse_rate_hz = pulse_total as f64 / elapsed;
-    let na_per_pulse = 1_000_000.0 / cal2;
-    let current_na = pulse_rate_hz * na_per_pulse;
+    let current_na = cal.current_na(pulse_rate_hz); // applies slope (1e6/cal2) and the cal1 baseline
     let current_ua = current_na / 1_000.0; // nA → µA: divide by 1000 (NOT 1e6 — that was the previous bug)
     println!();
     println!("  URBs read       : {urb_count}");
@@ -1114,7 +1174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Pulse total     : {pulse_total}");
     println!("  Pulses/sample   : {:.4}", avg_pulses_per_sample);
     println!("  Pulses/sec      : {:.0}", pulse_rate_hz);
-    println!("  cal2 (nA per pulse/s): {cal2}");
+    println!("  cal2 (nA per pulse/s): {cal2}  | cal1 baseline: {:.1} nA", cal.baseline_na);
     println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
     println!("  Raw stream saved to: {raw_path}");
 
@@ -1127,14 +1187,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_string_lossy()
             .into_owned()
     });
-    match render_plot(&bin_pulses, bin_ms, cal2, &plot_path) {
+    match render_plot(&bin_pulses, bin_ms, &cal, &plot_path) {
         Err(e) => eprintln!("  plot render failed: {e}"),
         Ok(svg_path) => {
             println!("  Plot rendered to   : {plot_path}");
             println!("  SVG version        : {svg_path}");
         }
     }
-    print_ascii_plot(&bin_pulses, bin_ms, cal2);
+    print_ascii_plot(&bin_pulses, bin_ms, &cal);
 
     // 6. ET_Stop
     println!("\n--- Step 6: Stop Collection ---");
