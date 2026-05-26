@@ -20,6 +20,14 @@
 //!   an earlier "(byte[2]<<16)|(byte[1]<<8)|byte[0]" interpretation (theory B)
 //!   was disproven by the captures (byte[0] is constant 0x70, not a low byte).
 //!
+//!   The stream is NOT 4-byte-aligned per URB: a lone 0x5c marker byte is
+//!   injected each time byte[1] wraps 0xff->0x00 (every 256 samples), and
+//!   samples straddle URB boundaries. [`EtDecoder`] handles this with a
+//!   byte-level resync state machine + carry across reads, so live decode is
+//!   robust and a saved RAW_OUT capture re-decodes byte-for-byte offline via
+//!   DECODE_IN=<path> (verified: both committed captures account for every
+//!   byte, resync_bytes == 0x5c marker count, zero carry remaining).
+//!
 //! Conversion:
 //!   pulse_rate_hz = sum(byte[2]) / measurement_seconds
 //!   current_nA    = pulse_rate_hz * 1_000_000 / cal2
@@ -699,6 +707,182 @@ impl Calib {
 }
 
 // ---------------------------------------------------------------------------
+// Sample decoder
+// ---------------------------------------------------------------------------
+
+/// Streaming EnergyTrace sample decoder.
+///
+/// Each sample is 4 bytes: `[0x70, window_counter, pulse_delta, flags]`. The
+/// stream is NOT cleanly 4-byte-aligned: a `0x5c` marker byte is injected
+/// every time the 8-bit window counter (byte[1]) wraps `0xff -> 0x00` (every
+/// 256 samples), and the URB / read-chunk boundaries fall on arbitrary bytes.
+///
+/// [`feed`](Self::feed) runs a state machine that locks onto the `0x70` frame
+/// marker, advances one byte at a time to resynchronise on any non-`0x70` byte
+/// (the `0x5c` marker, header residue, or corruption), and carries any
+/// trailing partial sample (<4 bytes) into the next `feed` call. This makes
+/// live decode robust no matter where the marker or URB boundary falls, and
+/// — because the saved `RAW_OUT` file is just the concatenated stream — lets
+/// the same decoder re-parse a capture offline byte-for-byte.
+struct EtDecoder {
+    /// Trailing bytes (<4) from the previous feed, prepended to the next.
+    carry: Vec<u8>,
+    /// Last window-counter byte seen, for mod-256 delta tracking.
+    prev_b1: Option<u8>,
+    /// Cumulative window count (each window = one sample period).
+    cum_windows: u64,
+    /// Windows per output bin (set from the requested sample rate + bin width).
+    windows_per_bin: u64,
+    /// Per-bin summed pulse counts — the binned current series.
+    bin_pulses: Vec<u64>,
+    /// Total decoded samples.
+    sample_count: u64,
+    /// Sum of pulse deltas (byte[2]) across all samples.
+    pulse_total: u64,
+    /// Count of `0x5c` window-wrap markers observed.
+    marker_count: u64,
+    /// Total non-`0x70` bytes skipped to realign (includes the markers).
+    resync_bytes: u64,
+}
+
+impl EtDecoder {
+    fn new(windows_per_bin: u64) -> Self {
+        Self {
+            carry: Vec::with_capacity(8),
+            prev_b1: None,
+            cum_windows: 0,
+            windows_per_bin: windows_per_bin.max(1),
+            bin_pulses: Vec::new(),
+            sample_count: 0,
+            pulse_total: 0,
+            marker_count: 0,
+            resync_bytes: 0,
+        }
+    }
+
+    /// Decode all complete samples in `payload` (with any carried-over prefix),
+    /// updating the running counters and the binned series.
+    fn feed(&mut self, payload: &[u8]) {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(payload);
+
+        let mut i = 0usize;
+        while i + 4 <= data.len() {
+            if data[i] != 0x70 {
+                // Not a frame marker. 0x5c is the documented window-counter-
+                // wrap marker; anything else is header residue or noise.
+                // Either way, advance one byte to realign.
+                if data[i] == 0x5c {
+                    self.marker_count += 1;
+                }
+                self.resync_bytes += 1;
+                i += 1;
+                continue;
+            }
+            let chunk = &data[i..i + 4];
+            self.sample_count += 1;
+            self.pulse_total += chunk[2] as u64;
+
+            // Advance the window counter by the byte[1] delta (mod 256).
+            let b1 = chunk[1];
+            let step = match self.prev_b1 {
+                None => 1u64,
+                Some(prev) => {
+                    let d = b1.wrapping_sub(prev);
+                    if d == 0 { 256 } else { d as u64 }
+                }
+            };
+            self.cum_windows += step;
+            self.prev_b1 = Some(b1);
+
+            let bin_idx = (self.cum_windows / self.windows_per_bin) as usize;
+            if bin_idx >= self.bin_pulses.len() {
+                self.bin_pulses.resize(bin_idx + 1, 0);
+            }
+            self.bin_pulses[bin_idx] += chunk[2] as u64;
+            i += 4;
+        }
+        // Keep whatever remains (a <4-byte partial sample, or trailing
+        // non-marker bytes) so a sample straddling the boundary is decoded.
+        self.carry.extend_from_slice(&data[i..]);
+    }
+}
+
+/// Offline re-decode of a saved `RAW_OUT` capture (`DECODE_IN=<path>`), exactly
+/// the way TI's own captures can be replayed. The file is the concatenated URB
+/// stream, so the first 8 bytes are the timestamp header (skipped) and the rest
+/// flows straight through [`EtDecoder`]. Honours the same SAMPLE_RATE / BIN_MS /
+/// CAL1 / CAL2 / PLOT_OUT env vars as the live flow, so a capture re-analyses
+/// identically without re-running hardware.
+fn decode_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== OFFLINE DECODE MODE (DECODE_IN={path}) ===");
+
+    let cal2: f64 = std::env::var("CAL2")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CAL2);
+    let cal1: f64 = std::env::var("CAL1")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let cal = Calib::from_cal(cal1, cal2);
+
+    let sample_rate: u32 = std::env::var("SAMPLE_RATE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10000);
+    let bin_ms: f64 = std::env::var("BIN_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    let sample_period_s = 1.0 / (sample_rate as f64);
+    let windows_per_bin: u64 = ((bin_ms / 1000.0) / sample_period_s).round() as u64;
+
+    let bytes = std::fs::read(path)?;
+    println!("  Read {} bytes from {path}", bytes.len());
+
+    // Skip the 8-byte timestamp header that leads the first URB in the capture.
+    let payload = if bytes.len() > 8 { &bytes[8..] } else { &bytes[..] };
+    let mut dec = EtDecoder::new(windows_per_bin);
+    dec.feed(payload);
+
+    // The capture has no wall-clock; derive elapsed time from the window count.
+    let elapsed = dec.cum_windows as f64 * sample_period_s;
+    let pulse_rate_hz = if elapsed > 0.0 {
+        dec.pulse_total as f64 / elapsed
+    } else {
+        0.0
+    };
+    let current_ua = cal.current_ua(pulse_rate_hz);
+
+    println!();
+    println!("  Samples         : {}", dec.sample_count);
+    println!("  Wrap markers    : {}  (0x5c byte[1] 0xff->0x00)", dec.marker_count);
+    println!("  Resync bytes    : {}  (non-0x70 bytes skipped)", dec.resync_bytes);
+    println!("  Carry remaining : {} bytes", dec.carry.len());
+    println!("  Windows (time)  : {}  ({:.3} s @ {sample_rate} Hz)", dec.cum_windows, elapsed);
+    println!("  Pulse total     : {}", dec.pulse_total);
+    println!("  Pulses/sec      : {:.0}", pulse_rate_hz);
+    println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
+
+    let plot_path = std::env::var("PLOT_OUT").unwrap_or_else(|_| {
+        std::path::Path::new(path)
+            .with_extension("decoded.png")
+            .to_string_lossy()
+            .into_owned()
+    });
+    match render_plot(&dec.bin_pulses, bin_ms, &cal, &plot_path) {
+        Err(e) => eprintln!("  plot render failed: {e}"),
+        Ok(svg_path) => {
+            println!("  Plot rendered to   : {plot_path}");
+            println!("  SVG version        : {svg_path}");
+        }
+    }
+    print_ascii_plot(&dec.bin_pulses, bin_ms, &cal);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Plotting
 // ---------------------------------------------------------------------------
 
@@ -936,6 +1120,12 @@ fn eeprom_dump(xds: &Xds110Handle) -> Result<(), Box<dyn std::error::Error>> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== XDS110 EnergyTrace via ICDI Protocol ===");
 
+    // Offline decode mode (DECODE_IN=<path>): re-parse a saved RAW_OUT capture
+    // through the same resync decoder, no probe required. Exits when done.
+    if let Ok(path) = std::env::var("DECODE_IN") {
+        return decode_file(&path);
+    }
+
     let xds = open_xds110()?;
 
     // EEPROM dump mode (EEPROM_DUMP=1): recover the probe's calibration store
@@ -1098,14 +1288,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = vec![0u8; ET_DATA_BUF_SIZE];
     let mut total_bytes = 0u64;
     let mut urb_count = 0u64;
-    let mut sample_count = 0u64;
-    let mut pulse_total = 0u64; // sum of byte[2] across all samples
-    // Time-binning state. byte[1] is a cumulative 10 kHz window counter (mod 256);
-    // we track the running window count by accumulating its delta on each record,
-    // handling the 256-wraparound. cum_windows × 100 µs = elapsed time.
-    let mut prev_b1: Option<u8> = None;
-    let mut cum_windows: u64 = 0;
-    let mut bin_pulses: Vec<u64> = Vec::new();
+    // The decoder owns all byte-level resync + binning state and carries
+    // partial samples across URB boundaries. See [`EtDecoder`].
+    let mut dec = EtDecoder::new(windows_per_bin);
     while start.elapsed() < Duration::from_secs(duration_secs) {
         match et_read_data(&xds, &mut buf, DATA_TIMEOUT) {
             Ok(0) => {
@@ -1116,38 +1301,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_bytes += n as u64;
                 raw_file.write_all(&buf[..n])?;
 
-                // First URB has an 8-byte timestamp header, subsequent URBs
-                // start directly at sample 0. Sample stride is 4 bytes.
+                // First URB has an 8-byte timestamp header; skip it so its
+                // bytes can't be mistaken for a sample. Subsequent URBs start
+                // directly at sample 0. The decoder resyncs internally, so a
+                // stray byte here is harmless, but skipping is exact.
                 let payload = if urb_count == 1 && n > 8 {
                     &buf[8..n]
                 } else {
                     &buf[..n]
                 };
-                for chunk in payload.chunks_exact(4) {
-                    if chunk[0] != 0x70 {
-                        continue; // skip non-sample bytes
-                    }
-                    sample_count += 1;
-                    pulse_total += chunk[2] as u64;
-
-                    // Advance window counter by the byte[1] delta (mod 256).
-                    let b1 = chunk[1];
-                    let step = match prev_b1 {
-                        None => 1u64,
-                        Some(prev) => {
-                            let d = b1.wrapping_sub(prev);
-                            if d == 0 { 256 } else { d as u64 }
-                        }
-                    };
-                    cum_windows += step;
-                    prev_b1 = Some(b1);
-
-                    let bin_idx = (cum_windows / windows_per_bin) as usize;
-                    if bin_idx >= bin_pulses.len() {
-                        bin_pulses.resize(bin_idx + 1, 0);
-                    }
-                    bin_pulses[bin_idx] += chunk[2] as u64;
-                }
+                dec.feed(payload);
 
                 if urb_count <= 2 {
                     let preview = &buf[..n.min(48)];
@@ -1162,6 +1325,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let elapsed = start.elapsed().as_secs_f64();
+    let sample_count = dec.sample_count;
+    let pulse_total = dec.pulse_total;
+    let marker_count = dec.marker_count;
+    let resync_bytes = dec.resync_bytes;
+    let bin_pulses = dec.bin_pulses;
     let avg_pulses_per_sample = pulse_total as f64 / sample_count.max(1) as f64;
     let pulse_rate_hz = pulse_total as f64 / elapsed;
     let current_na = cal.current_na(pulse_rate_hz); // applies slope (1e6/cal2) and the cal1 baseline
@@ -1170,6 +1338,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  URBs read       : {urb_count}");
     println!("  Total bytes     : {total_bytes}");
     println!("  Samples         : {sample_count}");
+    println!("  Wrap markers    : {marker_count}  (0x5c byte[1] 0xff->0x00)");
+    println!("  Resync bytes    : {resync_bytes}  (non-0x70 bytes skipped)");
+    println!("  Carry remaining : {} bytes", dec.carry.len());
     println!("  Avg sample rate : {:.0} Hz", sample_count as f64 / elapsed);
     println!("  Pulse total     : {pulse_total}");
     println!("  Pulses/sample   : {:.4}", avg_pulses_per_sample);
