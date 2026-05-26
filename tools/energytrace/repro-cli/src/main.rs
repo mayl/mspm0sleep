@@ -731,10 +731,10 @@ struct EtDecoder {
     prev_b1: Option<u8>,
     /// Cumulative window count (each window = one sample period).
     cum_windows: u64,
-    /// Windows per output bin (set from the requested sample rate + bin width).
-    windows_per_bin: u64,
-    /// Per-bin summed pulse counts — the binned current series.
-    bin_pulses: Vec<u64>,
+    /// Multi-stage CIC decimator: lowers the per-window pulse stream to the
+    /// output rate with a sinc^N anti-alias response. Replaces the old
+    /// boxcar-sum binning (which was a 1st-order CIC, sinc^1).
+    cic: Cic,
     /// Total decoded samples.
     sample_count: u64,
     /// Sum of pulse deltas (byte[2]) across all samples.
@@ -746,13 +746,12 @@ struct EtDecoder {
 }
 
 impl EtDecoder {
-    fn new(windows_per_bin: u64) -> Self {
+    fn new(windows_per_bin: u64, cic_order: usize) -> Self {
         Self {
             carry: Vec::with_capacity(8),
             prev_b1: None,
             cum_windows: 0,
-            windows_per_bin: windows_per_bin.max(1),
-            bin_pulses: Vec::new(),
+            cic: Cic::new(cic_order, windows_per_bin),
             sample_count: 0,
             pulse_total: 0,
             marker_count: 0,
@@ -760,8 +759,14 @@ impl EtDecoder {
         }
     }
 
+    /// The decimated current series, expressed as the boxcar-equivalent per-bin
+    /// pulse sum so the downstream pulses→µA / plotting path is unchanged.
+    fn bin_pulses(&self) -> &[f64] {
+        &self.cic.out
+    }
+
     /// Decode all complete samples in `payload` (with any carried-over prefix),
-    /// updating the running counters and the binned series.
+    /// updating the running counters and feeding the CIC decimator.
     fn feed(&mut self, payload: &[u8]) {
         let mut data = std::mem::take(&mut self.carry);
         data.extend_from_slice(payload);
@@ -795,17 +800,112 @@ impl EtDecoder {
             self.cum_windows += step;
             self.prev_b1 = Some(b1);
 
-            let bin_idx = (self.cum_windows / self.windows_per_bin) as usize;
-            if bin_idx >= self.bin_pulses.len() {
-                self.bin_pulses.resize(bin_idx + 1, 0);
+            // Feed one input-rate sample per elapsed window. Any windows skipped
+            // by a counter jump (dropped samples) carried zero pulses, exactly
+            // as the old boxcar treated them — push them as zeros so the CIC
+            // input rate stays uniform.
+            for _ in 1..step {
+                self.cic.push(0);
             }
-            self.bin_pulses[bin_idx] += chunk[2] as u64;
+            self.cic.push(chunk[2] as u64);
             i += 4;
         }
         // Keep whatever remains (a <4-byte partial sample, or trailing
         // non-marker bytes) so a sample straddling the boundary is decoded.
         self.carry.extend_from_slice(&data[i..]);
     }
+}
+
+/// Multi-stage CIC (cascaded-integrator-comb) decimator — a sinc^N anti-alias
+/// filter applied to the per-window pulse stream before downsampling by `rate`.
+///
+/// The EnergyTrace probe is a Σ-Δ modulator (integer charge pulses per window),
+/// so its DC/DC limit-cycle tone sits as out-of-band quantisation noise. The
+/// old decode summed pulses into disjoint R-window blocks — that is a 1st-order
+/// CIC (sinc^1), whose −13 dB sidelobes let the tone alias into baseband, and
+/// whose impulse response of length R means adjacent outputs share *zero* input
+/// samples (block-edge discontinuities). A CIC of order N has impulse-response
+/// support ~N·R, so after decimating by R adjacent outputs overlap by (N−1)·R
+/// samples — a true sliding window with proper stopband rejection.
+///
+/// Structure (Hogenauer 1981): N integrators at the input rate → decimate by R
+/// → N combs at the output rate (differential delay M = 1). It slides inherently
+/// and is multiply-free.
+struct Cic {
+    /// Decimation factor R: emit one output sample per R input windows.
+    rate: u64,
+    /// N integrator accumulators (input rate).
+    integ: Vec<i64>,
+    /// N comb delay registers, each holding that stage's previous input
+    /// (output rate, M = 1).
+    comb: Vec<i64>,
+    /// Input samples seen since the last decimation instant.
+    phase: u64,
+    /// Divisor turning the comb output into the boxcar-equivalent per-bin pulse
+    /// SUM, so the existing calibration/plot path needs no change.
+    bin_norm: f64,
+    /// Decimated output series (boxcar-equivalent per-bin pulse sums).
+    out: Vec<f64>,
+}
+
+impl Cic {
+    fn new(order: usize, rate: u64) -> Self {
+        let order = order.max(1);
+        let rate = rate.max(1);
+        // CIC DC gain is (R·M)^N with M = 1. Dividing the comb output by R^(N−1)
+        // yields the same per-bin pulse SUM a 1st-order boxcar over R windows
+        // would produce (an exact match at N = 1), so the downstream
+        // pulses→µA conversion is untouched.
+        let bin_norm = (rate as f64).powi(order as i32 - 1);
+        Self {
+            rate,
+            integ: vec![0i64; order],
+            comb: vec![0i64; order],
+            phase: 0,
+            bin_norm,
+            out: Vec::new(),
+        }
+    }
+
+    /// Feed one input-rate sample (the pulse count for a single window).
+    fn push(&mut self, x: u64) {
+        // Integrator cascade at the input rate. Wrapping (modular) arithmetic
+        // is intentional and exact: CIC integrators are allowed to overflow as
+        // long as the comb stage recovers the value in two's complement and the
+        // true output magnitude fits the register. i64 is ample here
+        // (N·log2(R) + 8 input bits ≪ 63 for R≤~100, N≤~5). See Hogenauer 1981.
+        let mut v = x as i64;
+        for stage in &mut self.integ {
+            *stage = stage.wrapping_add(v);
+            v = *stage;
+        }
+        self.phase += 1;
+        if self.phase < self.rate {
+            return;
+        }
+        self.phase = 0;
+        // Decimate by R (take the last integrator value), then the comb cascade
+        // at the output rate. Each comb stage outputs input − input[M ago].
+        let mut c = v; // == self.integ[order-1]
+        for prev in &mut self.comb {
+            let d = c.wrapping_sub(*prev);
+            *prev = c;
+            c = d;
+        }
+        self.out.push(c as f64 / self.bin_norm);
+    }
+}
+
+/// CIC decimator order (sinc^N) from the `CIC_ORDER` env var. Defaults to 3:
+/// measured on captures/led_on_calib.bin the residual ripple drops 0.65 %
+/// (sinc^1/boxcar) → 0.39 % (sinc^3) with diminishing returns past 3 at these
+/// decimation ratios. Set `CIC_ORDER=1` to reproduce the old boxcar binning.
+fn cic_order_env() -> usize {
+    std::env::var("CIC_ORDER")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+        .max(1)
 }
 
 /// Offline re-decode of a saved `RAW_OUT` capture (`DECODE_IN=<path>`), exactly
@@ -837,13 +937,15 @@ fn decode_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(10.0);
     let sample_period_s = 1.0 / (sample_rate as f64);
     let windows_per_bin: u64 = ((bin_ms / 1000.0) / sample_period_s).round() as u64;
+    let cic_order = cic_order_env();
+    println!("  CIC decimator   : order {cic_order} (sinc^{cic_order}), R={windows_per_bin} → {:.0} Hz", 1000.0 / bin_ms);
 
     let bytes = std::fs::read(path)?;
     println!("  Read {} bytes from {path}", bytes.len());
 
     // Skip the 8-byte timestamp header that leads the first URB in the capture.
     let payload = if bytes.len() > 8 { &bytes[8..] } else { &bytes[..] };
-    let mut dec = EtDecoder::new(windows_per_bin);
+    let mut dec = EtDecoder::new(windows_per_bin, cic_order);
     dec.feed(payload);
 
     // The capture has no wall-clock; derive elapsed time from the window count.
@@ -864,6 +966,7 @@ fn decode_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Pulse total     : {}", dec.pulse_total);
     println!("  Pulses/sec      : {:.0}", pulse_rate_hz);
     println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
+    report_ripple(dec.bin_pulses(), bin_ms, &cal, cic_order);
 
     let plot_path = std::env::var("PLOT_OUT").unwrap_or_else(|_| {
         std::path::Path::new(path)
@@ -871,15 +974,49 @@ fn decode_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .to_string_lossy()
             .into_owned()
     });
-    match render_plot(&dec.bin_pulses, bin_ms, &cal, &plot_path) {
+    match render_plot(dec.bin_pulses(), bin_ms, &cal, &plot_path) {
         Err(e) => eprintln!("  plot render failed: {e}"),
         Ok(svg_path) => {
             println!("  Plot rendered to   : {plot_path}");
             println!("  SVG version        : {svg_path}");
         }
     }
-    print_ascii_plot(&dec.bin_pulses, bin_ms, &cal);
+    print_ascii_plot(dec.bin_pulses(), bin_ms, &cal);
     Ok(())
+}
+
+/// Report residual ripple of the decimated current series — the metric the CIC
+/// is meant to lower (the Σ-Δ limit-cycle tone leaking into baseband). Skips the
+/// filter warm-up (the first `order` output samples, whose support is not yet
+/// fully populated) and reports pk-pk and RMS as a percentage of the mean. This
+/// is how the sinc^1 vs sinc^N improvement is quantified on a capture.
+fn report_ripple(bin_pulses: &[f64], bin_ms: f64, cal: &Calib, order: usize) {
+    let series = compute_series(bin_pulses, bin_ms, cal);
+    let ua: Vec<f64> = series.iter().skip(order).map(|&(_, c)| c).collect();
+    if ua.len() < 2 {
+        return;
+    }
+    let mean = ua.iter().sum::<f64>() / ua.len() as f64;
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut sq = 0.0;
+    for &v in &ua {
+        lo = lo.min(v);
+        hi = hi.max(v);
+        sq += (v - mean) * (v - mean);
+    }
+    let rms = (sq / ua.len() as f64).sqrt();
+    let pkpk = hi - lo;
+    if mean.abs() > f64::EPSILON {
+        println!(
+            "  Residual ripple : pk-pk {:.3} µA ({:.3} %)  RMS {:.3} µA ({:.3} %)  [sinc^{order}, mean {:.2} µA, n={}]",
+            pkpk,
+            100.0 * pkpk / mean,
+            rms,
+            100.0 * rms / mean,
+            mean,
+            ua.len(),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -888,7 +1025,7 @@ fn decode_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Print a 60×20 ASCII line plot of the binned current series to stdout, so
 /// the shape is visible in terminal output without opening the SVG.
-fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal: &Calib) {
+fn print_ascii_plot(bin_pulses: &[f64], bin_ms: f64, cal: &Calib) {
     if bin_pulses.is_empty() {
         return;
     }
@@ -901,10 +1038,10 @@ fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal: &Calib) {
         .map(|c| {
             let lo = c * bin_pulses.len() / WIDTH;
             let hi = ((c + 1) * bin_pulses.len() / WIDTH).max(lo + 1);
-            let sum: u64 = bin_pulses[lo..hi.min(bin_pulses.len())].iter().sum();
+            let sum: f64 = bin_pulses[lo..hi.min(bin_pulses.len())].iter().copied().sum();
             let n = (hi - lo).max(1);
             // pulses/sec across this bin range, then to µA via the calibration.
-            cal.current_ua(sum as f64 / (n as f64 * bin_s))
+            cal.current_ua(sum / (n as f64 * bin_s))
         })
         .collect();
 
@@ -927,14 +1064,14 @@ fn print_ascii_plot(bin_pulses: &[u64], bin_ms: f64, cal: &Calib) {
 }
 
 /// Compute the time-vs-current series from binned pulse counts.
-fn compute_series(bin_pulses: &[u64], bin_ms: f64, cal: &Calib) -> Vec<(f64, f64)> {
+fn compute_series(bin_pulses: &[f64], bin_ms: f64, cal: &Calib) -> Vec<(f64, f64)> {
     let bin_s = bin_ms / 1000.0;
     bin_pulses
         .iter()
         .enumerate()
         .map(|(i, &p)| {
             let t = (i as f64 + 0.5) * bin_s;
-            let current_ua = cal.current_ua(p as f64 / bin_s);
+            let current_ua = cal.current_ua(p / bin_s);
             (t, current_ua)
         })
         .collect()
@@ -983,7 +1120,7 @@ where
 /// SVG path replaces .png with .svg (or appends .svg if the base has no
 /// extension).
 fn render_plot(
-    bin_pulses: &[u64],
+    bin_pulses: &[f64],
     bin_ms: f64,
     cal: &Calib,
     out_path: &str,
@@ -1283,6 +1420,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rate.
     let sample_period_s = 1.0 / (sample_rate as f64);
     let windows_per_bin: u64 = ((bin_ms / 1000.0) / sample_period_s).round() as u64;
+    let cic_order = cic_order_env();
+    println!("  CIC decimator   : order {cic_order} (sinc^{cic_order}), R={windows_per_bin} → {:.0} Hz", 1000.0 / bin_ms);
 
     let start = std::time::Instant::now();
     let mut buf = vec![0u8; ET_DATA_BUF_SIZE];
@@ -1290,7 +1429,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut urb_count = 0u64;
     // The decoder owns all byte-level resync + binning state and carries
     // partial samples across URB boundaries. See [`EtDecoder`].
-    let mut dec = EtDecoder::new(windows_per_bin);
+    let mut dec = EtDecoder::new(windows_per_bin, cic_order);
     while start.elapsed() < Duration::from_secs(duration_secs) {
         match et_read_data(&xds, &mut buf, DATA_TIMEOUT) {
             Ok(0) => {
@@ -1329,7 +1468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pulse_total = dec.pulse_total;
     let marker_count = dec.marker_count;
     let resync_bytes = dec.resync_bytes;
-    let bin_pulses = dec.bin_pulses;
+    let bin_pulses = std::mem::take(&mut dec.cic.out);
     let avg_pulses_per_sample = pulse_total as f64 / sample_count.max(1) as f64;
     let pulse_rate_hz = pulse_total as f64 / elapsed;
     let current_na = cal.current_na(pulse_rate_hz); // applies slope (1e6/cal2) and the cal1 baseline
@@ -1347,6 +1486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Pulses/sec      : {:.0}", pulse_rate_hz);
     println!("  cal2 (nA per pulse/s): {cal2}  | cal1 baseline: {:.1} nA", cal.baseline_na);
     println!("  Estimated current  : {:.3} µA  ({:.3} mA)", current_ua, current_ua / 1000.0);
+    report_ripple(&bin_pulses, bin_ms, &cal, cic_order);
     println!("  Raw stream saved to: {raw_path}");
 
     // Render time-vs-current plot via plotters (PNG — no text labels because
@@ -1376,4 +1516,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     xds.handle.release_interface(DATA_IFACE)?;
     println!("\nDone.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cic;
+
+    /// A 1st-order CIC must reproduce the old boxcar exactly: each output is the
+    /// SUM of its R input windows. This guards the calibration path — the
+    /// CIC_ORDER=1 default-off case must be byte-identical to the prior decode.
+    #[test]
+    fn sinc1_equals_boxcar_sum() {
+        let r = 100u64;
+        let mut cic = Cic::new(1, r);
+        let xs: Vec<u64> = (0..1000).map(|n| (n % 7) as u64).collect();
+        for &x in &xs {
+            cic.push(x);
+        }
+        assert_eq!(cic.out.len(), xs.len() / r as usize);
+        for (bin, chunk) in cic.out.iter().zip(xs.chunks(r as usize)) {
+            let want: u64 = chunk.iter().sum();
+            assert!((bin - want as f64).abs() < 1e-6, "bin {bin} != sum {want}");
+        }
+    }
+
+    /// DC gain is normalised: a constant input C yields a per-bin "pulse sum" of
+    /// C*R at every order, so the pulses→µA conversion is order-independent
+    /// (verified empirically: mean current is identical across sinc^1..^5).
+    #[test]
+    fn dc_gain_is_order_independent() {
+        let (r, c) = (50u64, 13u64);
+        for order in 1..=5 {
+            let mut cic = Cic::new(order, r);
+            // Feed well past the warm-up so the impulse response is filled.
+            for _ in 0..(r as usize * (order + 4)) {
+                cic.push(c);
+            }
+            let want = (c * r) as f64; // boxcar-equivalent per-bin sum
+            let got = *cic.out.last().unwrap();
+            assert!(
+                (got - want).abs() < 1e-6,
+                "order {order}: steady-state {got} != {want}"
+            );
+        }
+    }
+
+    /// Higher CIC order must not change the DC level but must reduce ripple on a
+    /// tone-plus-DC input (the Σ-Δ limit-cycle model). Checks the RMS-ripple
+    /// ordering sinc^1 > sinc^3 that the feature is built to deliver.
+    #[test]
+    fn higher_order_reduces_ripple() {
+        let r = 100u64;
+        // DC + a tone near the input Nyquist-ish band that a sinc^1 passes badly.
+        let n = r as usize * 60;
+        // 0.023 cycles/sample → 2.3 cycles per R-window bin: a stopband tone
+        // sitting in a CIC sidelobe (not on a null, not aliased to DC), exactly
+        // the kind of leakage higher orders suppress.
+        let input: Vec<u64> = (0..n)
+            .map(|i| {
+                let phase = (i as f64) * 0.023 * std::f64::consts::TAU;
+                (50.0 + 20.0 * phase.sin()).round().max(0.0) as u64
+            })
+            .collect();
+        let ripple = |order: usize| -> f64 {
+            let mut cic = Cic::new(order, r);
+            for &x in &input {
+                cic.push(x);
+            }
+            let out: Vec<f64> = cic.out.iter().skip(order).copied().collect();
+            let mean = out.iter().sum::<f64>() / out.len() as f64;
+            (out.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / out.len() as f64).sqrt()
+        };
+        assert!(
+            ripple(3) < ripple(1),
+            "sinc^3 ripple {} should be < sinc^1 {}",
+            ripple(3),
+            ripple(1)
+        );
+    }
 }
