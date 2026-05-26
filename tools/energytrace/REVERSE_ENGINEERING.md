@@ -345,14 +345,55 @@ Commit `c4c970c` claimed "verified ~1.1 µA idle". That was actually 1.1 **mA**;
 the print path divided by 1e6 to convert nA → µA when it should have divided
 by 1e3. The calibration math itself is approximately correct.
 
-### Calibration TODOs
+### ET_Calibrate WORKS — cal1/cal2 read live from the probe (2026-05-25, beads mspm0sleep-dln)
 
-- `ET_Calibrate (cmd=0x1e)` with `tickCount=0` gets no response. The TI flow
-  loops over `EnergyTrace_LPRF::_CalibLoads`, calling `ET_Calibrate` with each
-  load's `tickCount`. Valid `tickCount` values are not yet known — they're
-  populated from a configuration source we have not located. Until that's
-  resolved, `cal2 = 10186` is a placeholder pulled from REVERSE_ENGINEERING
-  history; absolute readings are within order-of-magnitude but not calibrated.
+**Resolved.** `ET_Calibrate` (cmd 0x1e) returns valid `cal1`/`cal2` over USB once
+sent with the right preconditions and a non-zero `tickCount`. `repro-cli` now
+reads `cal2` straight from the probe (`CALIBRATE=1` to probe; the normal flow
+auto-calibrates unless `CAL2` overrides).
+
+Preconditions (mirrors `EnergyTrace_LPRF::PerformCalibration`, which runs inside
+`InitEnergyTrace` during `configure`, before `ET_Setup`/`ET_Start`):
+`DAP_Disconnect → XDS_ConnectET → ET_DCDC_SetVcc(3300) → ET_DCDC_RestartMCU →
+ET_Calibrate(tickCount)`.
+
+Live sweep of `tickCount` vs response (LP-MSPM0L1306):
+
+| tickCount | cal1 | cal2 |
+|---|---|---|
+| 1 | 3336 | 10185 |
+| 2 | 2247 | 10186 |
+| 4 | 1103 | 10185 |
+| ≥10 (10…65535) | **17** | **10186** |
+
+- **`cal2` is a rock-stable per-unit constant ≈ 10186**, independent of
+  `tickCount` — it is the calibration *scale*. It equals the value TI's
+  `GetCurrentInNA` divides by (`current_nA = pulses · 1e6 / cal2`), i.e. the
+  "nA per (pulse/s)" factor `repro-cli` already used. So `cal2 = 10186` was never
+  just a placeholder — it is the probe's genuine hardware calibration constant,
+  now confirmed by reading it directly.
+- **`cal1` is a settling offset**, not a load selector: large for tiny
+  `tickCount` (incomplete integration), converging to ~17 by `tickCount ≥ 10`.
+  `tickCount` is therefore an integration-window length, not an index into
+  `_CalibLoads`.
+- A non-zero `tickCount` returns **gracefully** (status 0) and does **not** stall
+  iface 2 — only `tickCount=0` (zero-length integration) times out, which is why
+  the earlier `tickCount=0` attempt appeared to "get no response."
+
+**Consequence for accuracy.** The per-unit scale is now obtained the same way TI
+gets it (live `ET_Calibrate`), not guessed. The remaining refinements toward a
+hard ±10% claim: (1) the small `cal1` offset, and (2) TI's full two-`_calibLine`
+fit vs. our single-scale model — both second-order next to `cal2`. A final
+validation against a bench-known load is still the right way to *prove* the
+absolute number (see "Empirical cal2 anchoring" below), but the scale is no
+longer in doubt.
+
+### Calibration TODOs (mostly superseded — see above)
+
+- ~~`ET_Calibrate (cmd=0x1e)` with `tickCount=0` gets no response~~ → SUPERSEDED:
+  use `tickCount ≥ 10`; `cal2 ≈ 10186` is read live. `tickCount=0` simply means a
+  zero-length measurement (times out). `cal2 = 10186` is the probe's real
+  constant, not a placeholder.
 - The full TI flow uses TWO calibration lines `(slope, offset)` per
   `_calibLine` and a `ProcessAnalogSamples` algorithm to convert raw samples
   to energy pulses. The simple "sum byte[2]" path works for analog profiling
@@ -474,6 +515,112 @@ probe's calibration MCU doesn't recognize.
    implement the calibPoint→calibLine fit. (The faithful path; new RE.)
 2. Anchor `cal2` against a bench-known load (precise external resistor, or the
    LaunchPad LED with a *measured* series resistor — see below).
+
+### USB/EEPROM read path — DECODED and tested (beads mspm0sleep-dln, 2026-05-25)
+
+The "read the probe's stored `_CalibLoads`" idea (path 1 above) was pursued to a
+concrete USB command and tested against the live LP-MSPM0L1306 probe.
+
+**`XDS_EEPROMRead` (libjscxds110.so @0x47504) — the probe-EEPROM read command:**
+
+| Field | Value |
+|---|---|
+| ICDI command byte | **0x3F** |
+| OUT framing (cmd_len = 8) | `[2a][05 00][3f][addr:u16 LE][len:u16 LE]` |
+| `len` limit | ≤ `0x10f9` (4345 B), else the lib returns `0xffffff86` |
+| Response (resp_len = len+7) | `[2a][(len+4):u16 LE][status:u32 LE][<len> EEPROM bytes]` |
+| Signature | `XDS_EEPROMRead(ctx, u16 addr, u16 len, void* out)` |
+
+Decoded from disassembly; `XDS_Execute` arg order (`rdi=ctx, esi=cmd_len,
+edx=resp_len, ecx=retries, r8=timeout`) confirmed against the known
+`ET_Calibrate` (cmd 6 / resp 0xf) framing. Sibling `XDS_EEPROMWrite` is at
+@0x475cc. Implemented in `repro-cli` under `EEPROM_DUMP=1` (see below).
+
+**Live-probe result: the firmware REFUSES it.** On XDS110v3 firmware
+`03.00.00.22`, `XDS_EEPROMRead` returns **`status = -390` (`0xFFFFFE7A`) at
+every address** `0x0000..` swept. The refusal is a clean application-level
+status — it does **not** stall iface 2 (an earlier "stall" reading was actually
+an infinite-loop bug in the sweep). The EEPROM read appears to be locked /
+manufacturing-only on production firmware. Corroborating evidence:
+`XDS_EEPROMRead` is an **exported-but-never-called** symbol across the entire
+CCS install (no caller in any `.so`), i.e. CCS itself never reads the probe
+EEPROM during a debug/EnergyTrace session.
+
+`ET_HardwareInfo` (cmd **0x46**, @0x463dc, resp_len 0xc) *does* work and returns
+`u32 = 2`, `u8 = 7` — an EnergyTrace hardware descriptor (HW present), but
+**not** the calibration table.
+
+**Implication for `_CalibLoads`.** TI does *not* obtain `_CalibLoads` by reading
+the probe EEPROM over USB at runtime. It comes from `ccBoard%d.dat` /
+`ccBrd%d.dat` via `SMG_LoadBoardData` — a **disk file** searched for in `BrdDat`
+directories (`$ORIGIN/../../common/targetdb/boarddat`, `./BrdDat`, etc.). No such
+file ships in this CCS install and none exists on this host, so it is generated
+at runtime (board-support / scan data), **not** a live EEPROM read. The earlier
+note "read from the probe's own EEPROM" (a78.4) is therefore **corrected**: the
+`ccBoard.dat` source is the board-data plugin/disk path, and the one USB command
+that *could* read the probe EEPROM (`0x3f`) is firmware-blocked.
+
+**Remaining USB-path options** (the direct EEPROM read being a dead end):
+- Capture a real CCS EnergyTrace session with `usbmon` + `strace` to see whether
+  CCS ever generates/reads `ccBoard0.dat`, and the real `ET_Calibrate`
+  tickCounts it drives. (Definitive, but needs CCS Theia running + usbmon.)
+- Treat calibration as **board-type** (not per-unit): if the `_CalibLoads`
+  tickCounts in `ccBoard.dat` are identical for every LP-MSPM0L1306, obtain that
+  board-support data once rather than per-probe.
+- Fall back to the empirical `cal2` anchor below.
+
+**Reproduce:**
+```bash
+cd tools/energytrace/repro-cli
+EEPROM_DUMP=1 EEPROM_SIZE=16 cargo run            # single read → status -390
+EEPROM_DUMP=1 EEPROM_KEEPGOING=1 EEPROM_SIZE=256 EEPROM_CHUNK=16 cargo run  # sweep
+# Env: CONNECT={et|xds|none}, EEPROM_ADDR, EEPROM_SIZE, EEPROM_CHUNK, EEPROM_OUT
+```
+
+### Is the calibration per-serial or per-board-type? — per-board-type (verified)
+
+Two questions settled by static analysis of the board-data and EnergyTrace libs:
+
+**1. Does CCS *write* (generate) the `.dat` calibration/board files?** Yes — they
+are a generated/cached artifact, not purely shipped:
+- `libxdsboard.so` (which owns the `ccBoard%d.dat` / `ccBrd%d.dat` / `board%d.cfg`
+  format strings) imports **only `sprintf`** — no `fopen`/`fread`/`fwrite`. It
+  merely *builds the filename* and delegates I/O.
+- The board-data I/O libs it delegates to — `libjtagdata.so` ("JTAG board data"),
+  `libxdsfast3.so`, and the EnergyTrace libs themselves — all import
+  `fopen`/`fread`/**`fwrite`**. The `BrdDat` search dirs are writable. So the
+  `.dat` is a scan/autodetect cache CCS can regenerate, consistent with there
+  being no shipped copy in this install.
+
+**2. Is it keyed by probe serial number?** No:
+- The filename uses `%d` (an **integer index**, filled by `sprintf`), never a
+  `%s` serial string → `ccBoard0.dat`, not `ccBoard<serial>.dat`.
+- The calibration path keys off **board/family config** (`board%d.cfg`,
+  `xdsfamily.cfg`); the string `serial` does not appear anywhere in
+  `libenergytracestandalone.so`'s calibration code (only the unrelated
+  `xds100serial` adapter name).
+
+**Confirmed calibration model** (`EnergyTrace_LPRF::PerformCalibration` @0x3ea02,
+disassembly verified): the per-unit and per-board-type inputs are cleanly split —
+
+| Input | Source | Scope |
+|---|---|---|
+| per-load `tickCount` | `_CalibLoads[i]` (from board-data file) | **board-type** |
+| `cal1`, `cal2` (measured tick ratio) | **live `ET_Calibrate` (cmd 0x1e)** per load | **per-unit** |
+| reference current `y` | `GetCurrentInNA(i)` (`.rodata` constants) | board-type |
+
+`PerformCalibration` loops `_CalibLoads`, calls `ET_Calibrate(tickCount)` → gets
+`cal1`/`cal2` live, sets `point.x = (double)cal1/cal2`, `point.y =
+GetCurrentInNA(i)`, then fits consecutive points into `_calibLine` slopes.
+
+**So the per-unit calibration is already obtainable** via `ET_Calibrate`, which
+`repro-cli` implements. The *only* missing input is the board-type `_CalibLoads`
+**tickCount table** (a handful of u16 values, identical for every
+LP-MSPM0L1306). It is not a per-probe secret and does not require the (blocked)
+EEPROM read — it needs either the board-support `.dat`/`.cfg` from a fuller
+CCS+MSPM0 SDK install, or empirically discovering which `tickCount` inputs make
+`ET_Calibrate` return a valid `cal1`/`cal2` (note: `tickCount=0` times out, and
+a true timeout — unlike the `-390` refusal — *does* stall iface 2).
 
 ### Empirical cal2 anchoring from the LED load (and its limit)
 

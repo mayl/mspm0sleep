@@ -25,12 +25,15 @@
 //!   current_nA    = pulse_rate_hz * 1_000_000 / cal2
 //!   current_µA    = current_nA / 1_000
 //!
-//! cal2 is the per-load calibration constant. TI obtains it by running
-//! ET_Calibrate against a table of reference loads (`_CalibLoads`) read from
-//! the probe's own EEPROM via SMG_LoadBoardData; that table is not available
-//! to us yet (see REVERSE_ENGINEERING.md §"EnergyTrace Calibration Architecture"
-//! and beads mspm0sleep-a78.4). Until then cal2 is anchored empirically from
-//! the known LaunchPad LED load — see CAL2 below.
+//! cal2 is the per-unit calibration scale. We now read it LIVE from the probe
+//! via ET_Calibrate (cmd 0x1e) — verified 2026-05-25 (beads mspm0sleep-dln):
+//! cal2 ≈ 10186 (rock-stable across tickCount), cal1 ≈ 17 (a settling offset).
+//! This is the same constant TI's GetCurrentInNA divides by. The normal flow
+//! auto-calibrates (Step 2); CALIBRATE=1 runs a standalone tickCount probe;
+//! CAL2 overrides; DEFAULT_CAL2 is only the fallback if ET_Calibrate fails.
+//! (TI's full path also reads a `_CalibLoads` reference table from a board-data
+//! .dat file, but the per-unit scale we need is cal2, read directly here. See
+//! REVERSE_ENGINEERING.md §"ET_Calibrate WORKS".)
 
 use plotters::prelude::*;
 use rusb::{Context, DeviceHandle, UsbContext};
@@ -50,6 +53,7 @@ const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
 
 // ICDI protocol constants
 const SYNC_BYTE: u8 = 0x2a;
+const CMD_XDS_CONNECT: u8 = 0x01;
 const CMD_ET_SETUP: u8 = 0x1d;
 #[allow(dead_code)]
 const CMD_ET_CALIBRATE: u8 = 0x1e;
@@ -59,6 +63,14 @@ const CMD_XDS_CONNECT_ET: u8 = 0x28;
 const CMD_ET_SETUP_RANGE: u8 = 0x30;
 const CMD_ET_DCDC_SET_VCC: u8 = 0x24;
 const CMD_ET_DCDC_RESTART: u8 = 0x25;
+// XDS_EEPROMRead (libjscxds110.so @0x47504): read the probe's on-board EEPROM,
+// the suspected store for the per-unit `_CalibLoads` calibration table.
+//   OUT payload (cmd_len=8): [addr:u16 LE][len:u16 LE]
+//   response   (resp_len=len+7): [status:u32][<len> EEPROM bytes]
+// `len` must be <= 0x10f9 (else the lib returns 0xffffff86). See beads
+// mspm0sleep-dln and the `xds110-eeprom-read-cmd` memory.
+const CMD_XDS_EEPROM_READ: u8 = 0x3f;
+const EEPROM_MAX_CHUNK: u16 = 0x10f9;
 
 // Interface 2: Command channel (ICDI framing)
 const CMD_IFACE: u8 = 2;
@@ -383,6 +395,186 @@ fn et_connect(xds: &Xds110Handle) -> Result<i32, Box<dyn std::error::Error>> {
     icdi_execute(xds, CMD_XDS_CONNECT_ET, &[], 2)
 }
 
+/// Plain (non-EnergyTrace) connect. `XDS_Open` in libjscxds110.so always sends
+/// either XDS_Connect or XDS_ConnectET immediately after claiming interfaces,
+/// before any other ICDI command. Used by the EEPROM-dump path.
+fn xds_connect(xds: &Xds110Handle) -> Result<i32, Box<dyn std::error::Error>> {
+    println!("  XDS_Connect (cmd=0x01)...");
+    icdi_execute(xds, CMD_XDS_CONNECT, &[], 2)
+}
+
+/// One ET_Calibrate (cmd 0x1e) attempt with a single tickCount, retries=1.
+/// Returns Ok(Some((cal1,cal2))) on a status-0 response, Ok(None) on a non-zero
+/// status (graceful refusal), Err on timeout/transport (which stalls iface 2).
+fn et_calibrate_once(
+    xds: &Xds110Handle,
+    tick_count: u16,
+) -> Result<Option<(u32, u32)>, Box<dyn std::error::Error>> {
+    let payload = [(tick_count & 0xff) as u8, ((tick_count >> 8) & 0xff) as u8];
+    let tx = IcdiPacket::new(CMD_ET_CALIBRATE, &payload);
+    let mut rx = IcdiPacket::new(0, &[]);
+    rx.buf.fill(0);
+
+    icdi_send(xds, &tx)?;
+    let n = icdi_recv(xds, &mut rx)?;
+    if n == 0 {
+        return Err(format!("ET_Calibrate(tickCount={tick_count}) TIMEOUT (no response)").into());
+    }
+    if rx.buf[0] != SYNC_BYTE {
+        return Err(format!("ET_Calibrate: bad sync 0x{:02x}", rx.buf[0]).into());
+    }
+    let status = rx.response_status();
+    if status != 0 {
+        println!("  tickCount={tick_count:<6} → status={status} (graceful refusal, no cal)");
+        return Ok(None);
+    }
+    let cal1 = u32::from_le_bytes([rx.buf[7], rx.buf[8], rx.buf[9], rx.buf[10]]);
+    let cal2 = u32::from_le_bytes([rx.buf[11], rx.buf[12], rx.buf[13], rx.buf[14]]);
+    println!("  tickCount={tick_count:<6} → status=0  cal1={cal1} (0x{cal1:08x})  cal2={cal2} (0x{cal2:08x})  ratio={:.6}", cal1 as f64 / cal2.max(1) as f64);
+    Ok(Some((cal1, cal2)))
+}
+
+/// CALIBRATE mode: try to coax real cal1/cal2 out of the probe via ET_Calibrate.
+/// Does dap_reset + ConnectET + DCDC init (the precondition PerformCalibration
+/// runs under), then sweeps the tickCounts in `TICKCOUNTS` (comma-separated,
+/// default a spread of hypotheses). Stops on the first success or the first
+/// timeout (which stalls iface 2 → replug). See beads mspm0sleep-dln.
+fn calibrate_probe(xds: &Xds110Handle) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== ET_CALIBRATE PROBE MODE (cmd 0x1e) ===");
+    dap_reset(xds);
+    let st = et_connect(xds)?;
+    println!("  XDS_ConnectET status = {st}");
+    let st = et_dcdc_set_vcc(xds, 3300)?;
+    println!("  ET_DCDC_SetVcc status = {st}");
+    let st = et_dcdc_restart(xds)?;
+    println!("  ET_DCDC_RestartMCU status = {st}");
+    if std::env::var("CALIB_SETUP").is_ok() {
+        let st = et_setup(xds, 0, 10000, 0, 0)?;
+        println!("  ET_Setup status = {st}");
+    }
+
+    let list = std::env::var("TICKCOUNTS")
+        .unwrap_or_else(|_| "1000,256,16,4096,100,1,10000,65535".into());
+    let ticks: Vec<u16> = list
+        .split(',')
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .map(|v| v as u16)
+        .collect();
+    println!("  sweeping tickCounts: {ticks:?}");
+    println!("  (a status-0 response gives cal1/cal2; a TIMEOUT stalls iface 2 → replug)\n");
+
+    let mut points: Vec<(u16, u32, u32)> = Vec::new();
+    for tc in ticks {
+        match et_calibrate_once(xds, tc) {
+            Ok(Some((cal1, cal2))) => points.push((tc, cal1, cal2)),
+            Ok(None) => continue, // graceful refusal — safe to try next
+            Err(e) => {
+                eprintln!("  {e}");
+                eprintln!("  iface 2 is now stalled — REPLUG the probe, then rerun (set TICKCOUNTS to the untried values)");
+                break;
+            }
+        }
+    }
+    if points.is_empty() {
+        println!("\n  no tickCount in the list produced a status-0 cal1/cal2");
+    } else {
+        println!("\n  tickCount -> (cal1, cal2, ratio cal1/cal2):");
+        for (tc, c1, c2) in &points {
+            println!("    {tc:<6}  cal1={c1:<8} cal2={c2:<8} ratio={:.6}", *c1 as f64 / (*c2).max(1) as f64);
+        }
+    }
+    Ok(())
+}
+
+/// ET_HardwareInfo (cmd 0x46): query the probe's EnergyTrace hardware descriptor.
+/// Mirrors libjscxds110.so:ET_HardwareInfo@0x463dc — cmd_len=4, resp_len=0xc;
+/// on success returns a u32 (payload[0..4]) and a u8 (payload[4]).
+fn et_hardware_info(xds: &Xds110Handle) -> Result<(u32, u8), Box<dyn std::error::Error>> {
+    println!("  ET_HardwareInfo (cmd=0x46)...");
+    let tx = IcdiPacket::new(0x46, &[]);
+    let mut rx = IcdiPacket::new(0, &[]);
+    rx.buf.fill(0);
+    for attempt in 0..2 {
+        icdi_send(xds, &tx)?;
+        let n = icdi_recv(xds, &mut rx)?;
+        if n == 0 {
+            eprintln!("  recv attempt {attempt}: timeout");
+            continue;
+        }
+        if rx.buf[0] != SYNC_BYTE {
+            eprintln!("  recv attempt {attempt}: bad sync 0x{:02x}", rx.buf[0]);
+            continue;
+        }
+        let status = rx.response_status();
+        if status != 0 {
+            return Err(format!("ET_HardwareInfo status={status}").into());
+        }
+        let a = u32::from_le_bytes([rx.buf[7], rx.buf[8], rx.buf[9], rx.buf[10]]);
+        let b = rx.buf[11];
+        return Ok((a, b));
+    }
+    Err("ET_HardwareInfo: all retries exhausted".into())
+}
+
+/// Read `len` bytes from the probe EEPROM starting at `addr` via XDS_EEPROMRead
+/// (cmd 0x3f). Returns the raw EEPROM bytes (the response status must be 0).
+/// Mirrors libjscxds110.so:XDS_EEPROMRead@0x47504.
+fn xds_eeprom_read(
+    xds: &Xds110Handle,
+    addr: u16,
+    len: u16,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if len == 0 || len > EEPROM_MAX_CHUNK {
+        return Err(format!("EEPROM read len {len} out of range (1..=0x10f9)").into());
+    }
+    // Payload: [addr:u16 LE][len:u16 LE]
+    let payload = [
+        (addr & 0xff) as u8,
+        ((addr >> 8) & 0xff) as u8,
+        (len & 0xff) as u8,
+        ((len >> 8) & 0xff) as u8,
+    ];
+    let tx = IcdiPacket::new(CMD_XDS_EEPROM_READ, &payload);
+    let mut rx = IcdiPacket::new(0, &[]);
+    rx.buf.fill(0);
+
+    for attempt in 0..2 {
+        icdi_send(xds, &tx)?;
+        let n = match icdi_recv(xds, &mut rx) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("  recv attempt {attempt}: {e}");
+                continue;
+            }
+        };
+        if n == 0 {
+            eprintln!("  recv attempt {attempt}: timeout");
+            continue;
+        }
+        if rx.buf[0] != SYNC_BYTE {
+            eprintln!("  recv attempt {attempt}: bad sync 0x{:02x}", rx.buf[0]);
+            continue;
+        }
+        let status = rx.response_status();
+        if status != 0 {
+            return Err(
+                format!("XDS_EEPROMRead(addr=0x{addr:04x}, len={len}) status={status}").into(),
+            );
+        }
+        // Response frame in our flat rx buffer: [0]=sync, [1..3]=len,
+        // [3..7]=status(u32), [7..]=payload (the EEPROM bytes).
+        let end = 7 + len as usize;
+        if n < end {
+            return Err(format!(
+                "XDS_EEPROMRead short response: got {n}B, need {end}B for len={len}"
+            )
+            .into());
+        }
+        return Ok(rx.buf[7..end].to_vec());
+    }
+    Err("XDS_EEPROMRead: all retries exhausted".into())
+}
+
 fn et_setup(
     xds: &Xds110Handle,
     mode: u8,
@@ -585,6 +777,112 @@ fn render_plot(
 }
 
 // ---------------------------------------------------------------------------
+// EEPROM dump
+// ---------------------------------------------------------------------------
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u32::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse().ok()
+            }
+        })
+        .unwrap_or(default)
+}
+
+/// Print a classic 16-byte-per-line hexdump with ASCII gutter.
+fn hexdump(data: &[u8], base: u16) {
+    for (i, row) in data.chunks(16).enumerate() {
+        let addr = base as usize + i * 16;
+        let hex: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = row
+            .iter()
+            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .collect();
+        println!("  {addr:04x}  {:<47}  {ascii}", hex.join(" "));
+    }
+}
+
+/// Dump the probe EEPROM via XDS_EEPROMRead (cmd 0x3f). Self-contained: does the
+/// DAP reset + connect, then reads `EEPROM_SIZE` bytes from `EEPROM_ADDR` in
+/// `EEPROM_CHUNK`-byte requests, writes them to `EEPROM_OUT`, and hexdumps them.
+/// This is the USB/EEPROM path for recovering the probe's `_CalibLoads` table
+/// (beads mspm0sleep-dln). A failed read stalls iface 2 for the rest of the
+/// session — we stop on the first error and warn to replug.
+fn eeprom_dump(xds: &Xds110Handle) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== EEPROM DUMP MODE (XDS_EEPROMRead cmd 0x3f) ===");
+
+    // Clear any probe-rs CMSIS-DAP state, then connect (ICDI requires a connect
+    // as the first command). CONNECT selects which: et (default, verified) or
+    // xds (plain 0x01) or none.
+    dap_reset(xds);
+    match std::env::var("CONNECT").unwrap_or_else(|_| "et".into()).as_str() {
+        "none" => println!("  CONNECT=none — skipping connect"),
+        "xds" => {
+            let st = xds_connect(xds)?;
+            println!("  XDS_Connect status = {st}");
+        }
+        _ => {
+            let st = et_connect(xds)?;
+            println!("  XDS_ConnectET status = {st}");
+        }
+    }
+
+    // Query the ET hardware descriptor first (well-formed, cheap). Tells us
+    // whether the probe exposes an EnergyTrace HW block / version at all.
+    match et_hardware_info(xds) {
+        Ok((a, b)) => println!("  ET_HardwareInfo => u32=0x{a:08x} ({a})  u8=0x{b:02x} ({b})"),
+        Err(e) => eprintln!("  ET_HardwareInfo failed: {e}"),
+    }
+
+    // EEPROM_KEEPGOING: continue past per-address rejections instead of
+    // stopping. Lets us learn whether a -390 rejection stalls iface 2 (next
+    // read times out) or is graceful (next read also returns a clean status),
+    // and whether any address region is readable at all.
+    let keep_going = std::env::var("EEPROM_KEEPGOING").is_ok();
+    let start_addr = env_u32("EEPROM_ADDR", 0) as u16;
+    let total = env_u32("EEPROM_SIZE", 0x400) as usize; // 1 KiB default
+    let chunk = env_u32("EEPROM_CHUNK", 64).clamp(1, EEPROM_MAX_CHUNK as u32) as u16;
+    let out = std::env::var("EEPROM_OUT").unwrap_or_else(|_| "/tmp/xds110_eeprom.bin".into());
+    println!(
+        "  reading {total} bytes from 0x{start_addr:04x} in {chunk}-byte chunks (CONNECT, EEPROM_ADDR/SIZE/CHUNK/OUT to override)"
+    );
+
+    let mut data: Vec<u8> = Vec::with_capacity(total);
+    let mut addr = start_addr;
+    // Bound the loop by *address* covered, not by bytes collected — otherwise a
+    // keep-going sweep where every read errors never fills `data` and spins.
+    let end_addr = start_addr.wrapping_add(total as u16);
+    while addr < end_addr {
+        let want = chunk.min(end_addr.wrapping_sub(addr));
+        match xds_eeprom_read(xds, addr, want) {
+            Ok(bytes) => {
+                data.extend_from_slice(&bytes);
+                addr = addr.wrapping_add(want);
+            }
+            Err(e) => {
+                eprintln!("  err at 0x{addr:04x}: {e}");
+                if keep_going {
+                    addr = addr.wrapping_add(want);
+                    continue;
+                }
+                eprintln!("  (iface 2 may now be stalled — physically replug before the next run)");
+                break;
+            }
+        }
+    }
+
+    std::fs::write(&out, &data)?;
+    println!("\n  Dumped {} bytes to {out}\n", data.len());
+    hexdump(&data, start_addr);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -592,6 +890,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== XDS110 EnergyTrace via ICDI Protocol ===");
 
     let xds = open_xds110()?;
+
+    // EEPROM dump mode (EEPROM_DUMP=1): recover the probe's calibration store
+    // via XDS_EEPROMRead, then exit without running the ET capture flow.
+    if std::env::var("EEPROM_DUMP").is_ok() {
+        let r = eeprom_dump(&xds);
+        xds.handle.release_interface(CMD_IFACE)?;
+        xds.handle.release_interface(DATA_IFACE)?;
+        return r;
+    }
+
+    // CALIBRATE mode (CALIBRATE=1): probe ET_Calibrate for real cal1/cal2.
+    if std::env::var("CALIBRATE").is_ok() {
+        let r = calibrate_probe(&xds);
+        let _ = xds.handle.release_interface(CMD_IFACE);
+        let _ = xds.handle.release_interface(DATA_IFACE);
+        return r;
+    }
 
     // Flow mirrors XDS_Open + EnergyTrace_LPRF::InitEnergyTrace from
     // libjscxds110.so / libenergytracestandalone.so:
@@ -622,21 +937,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status = et_dcdc_restart(&xds)?;
     println!("  ET_DCDC_RestartMCU status = {status}");
 
-    // 2. Calibrate (optional — skipped for now). EmulatorComm_XDS110::CalibrateTicks
-    // is invoked from EnergyTrace_LPRF::PerformCalibration in a loop over
-    // `_CalibLoads`, with tickCount taken from each load entry. The right
-    // tickCount values are not yet known, and tickCount=0 gets no response
-    // from this XDS110v3 firmware. Streaming raw data still works without
-    // it; we just lose the µA conversion factor (we'll recover it from
-    // physics — known LED current vs busy-loop delta — in a follow-up).
-    // cal2: nA per (pulse/s). Empirically anchored (see DEFAULT_CAL2); override
-    // with CAL2 while re-deriving against a known load.
-    let cal2: f64 = std::env::var("CAL2")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_CAL2);
-    println!("  cal2 = {cal2} nA per (pulse/s) {}",
-        if std::env::var("CAL2").is_ok() { "(CAL2 override)" } else { "(default — see DEFAULT_CAL2)" });
+    // 2. Calibrate — read the probe's real calibration constant LIVE via
+    // ET_Calibrate (cmd 0x1e), mirroring EnergyTrace_LPRF::PerformCalibration.
+    // VERIFIED 2026-05-25 (beads mspm0sleep-dln): the probe returns cal1
+    // (a settling offset) and cal2 (the per-unit scale constant). cal2 is
+    // rock-stable at ~10186 for any tickCount; cal1 settles to ~17 once
+    // tickCount >= 10. cal2 IS the "nA per (pulse/s)" scale in TI's GetCurrentInNA
+    // model (current_nA = pulses · 1e6 / cal2), so we read it straight from the
+    // probe instead of hardcoding. tickCount=1000 is in the settled region and
+    // returns gracefully (no iface stall). CAL2 env still overrides.
+    println!("\n--- Step 2: Calibrate (read cal2 from probe) ---");
+    let cal2: f64 = if let Ok(s) = std::env::var("CAL2") {
+        let v = s.parse().unwrap_or(DEFAULT_CAL2);
+        println!("  cal2 = {v} nA per (pulse/s) (CAL2 override)");
+        v
+    } else {
+        match et_calibrate_once(&xds, 1000) {
+            Ok(Some((cal1, c2))) => {
+                println!("  ET_Calibrate → cal1(offset)={cal1}, cal2(scale)={c2}; using live cal2");
+                c2 as f64
+            }
+            Ok(None) => {
+                eprintln!("  ET_Calibrate refused (non-zero status); falling back to DEFAULT_CAL2={DEFAULT_CAL2}");
+                DEFAULT_CAL2
+            }
+            Err(e) => {
+                eprintln!("  ET_Calibrate failed ({e}); falling back to DEFAULT_CAL2={DEFAULT_CAL2}");
+                DEFAULT_CAL2
+            }
+        }
+    };
 
     // 3. ET_Setup (analog profiling mode, 10 kHz samples by default)
     println!("\n--- Step 3: Setup EnergyTrace ---");
