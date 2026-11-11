@@ -493,7 +493,9 @@ dependencies = [
  "defmt",
  "defmt-rtt",
  "embassy-executor",
+ "embassy-futures",
  "embassy-mspm0",
+ "embassy-sync",
  "embassy-time",
  "panic-probe",
 ]

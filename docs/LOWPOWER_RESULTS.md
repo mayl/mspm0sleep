@@ -66,11 +66,9 @@ Verified:
   it is the thermistor (below).
 - With J15 removed the target rail idles at about 1.6 uA, consistent with the
   chip being in STANDBY.
-- GPIO wake from deep sleep works. In `lp_blinky_button` (60 s, S2 pressed four
-  times by hand) the LED period switches 2.0 s -> 0.5 s -> 2.0 s -> 0.5 s ->
-  2.0 s, each change taking effect on the next cycle, with the floor between
-  pulses unchanged at about 20 pulses/s. No press was missed in four; that is
-  too few to say anything about erratum GPIO_ERR_01.
+- **GPIO edges do NOT wake the chip from the default idle state (STANDBY1)
+  unless the port's FASTWAKE bit is set for the pin, and upstream never sets
+  it.** See "GPIO wake" below.
 
 Not verified:
 
@@ -81,6 +79,34 @@ Not verified:
   repeated calibration (mspm0sleep-av2).
 - **STOP-level guards.** Nothing here holds a `WakeGuard`, so only the
   no-guard (STANDBY1) path was exercised.
+
+## GPIO wake needs FASTWAKE (upstream gap)
+
+`firmware/src/lib.rs::blinky` flashes the LED immediately when the button task
+sees a falling edge on S2 (PA14), so a detected press shows up off the 2 s
+timer grid. Short taps (press and release between flashes), 45 s captures:
+
+| Firmware | Difference | Flashes off the timer grid |
+|---|---|---|
+| `lp_blinky` | upstream defaults, idle in STANDBY1 | none: 22 flashes, all exactly 2.00 s apart (`tap_default.bin`) |
+| `lp_blinky_fastwake` | plus `GPIOA.FASTWAKE` bit 14 | many: flashes within the gap after each tap, rate toggles (`tap_fastwake.bin`) |
+
+Idle floor is the same in both (about 20 pulses/s), so FASTWAKE costs nothing
+measurable here.
+
+With defaults, a press is only registered if the button is still held when the
+time driver next wakes the chip (observed by hand: "hold it until the LED comes
+on"). That fits the edge detector having no clock in STANDBY1. An earlier
+version of this document claimed GPIO wake was verified from a capture where
+the blink rate changed; that capture could not distinguish a GPIO wake from a
+press noticed at the next timer wake, and the claim was wrong.
+
+In upstream `embassy-mspm0/src/gpio.rs` nothing writes `FASTWAKE`, and
+"wakeup enable" is a TODO (line 202). Workarounds today: set the bit through
+the PAC as `lp_blinky_fastwake` does, or hold a `WakeGuard` to cap idle at a
+shallower mode (`lp_blinky_standby0`, `lp_blinky_stop2`: built, not yet
+tested). The tap tests rely on a person pressing the button; the baseline run
+has no independent record that taps occurred.
 
 ## Corrections to earlier conclusions
 
