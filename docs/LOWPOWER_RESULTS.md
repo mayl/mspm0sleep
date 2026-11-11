@@ -107,7 +107,7 @@ cell starts from a reset and is read once, after its pulses.
 ### Results: timer-free firmware, 20 pulses per cell
 
 By default the firmware stays awake until the pin is high again before
-re-arming. "Immediate re-arm" re-arms and sleeps within microseconds of the
+re-arming (so it always sleeps armed for falling with the pin high). "Immediate re-arm" re-arms and sleeps within microseconds of the
 edge, while the pin is still low.
 
 | Idle mode | FASTWAKE | 8.7 us | 833 us | 30 ms | 30 ms, immediate re-arm |
@@ -137,63 +137,84 @@ Reading:
   detection there is evidently clocked by LFCLK. With FASTWAKE all are caught.
 - **STOP0** catches everything.
 
-### The STANDBY1 + FASTWAKE caveat
+### The STANDBY1 + FASTWAKE rule: armed edge and pin level must agree at sleep
 
-In that one mode, later edges are lost if the interrupt is re-armed too soon
-after the wake while the pin is still low. After the first edge the firmware is
-deaf; reading the counter over SWD (which forces the chip active for a moment)
-lets exactly one more edge through each time.
+In that one mode, later edges are lost **if and only if the chip goes to sleep
+armed for a falling edge while the pin is low**. It has nothing to do with how
+long the chip was awake. Plain `wait_for_falling_edge`, re-armed a true time
+after the edge, pulse widths verified (see "Measurement corrections"):
 
-| Pulse | Awake time before re-arm | Pin at re-arm | Counted |
+| Pulse | Re-armed after | Pin at re-arm | Counted |
 |---|---|---|---|
-| 30 ms | 0, 10, 30, 50, 100, 300 us, 1, 2, 3, 5, 7 ms | low | 1/20 each |
-| 30 ms | 10 ms | low | 20/20 |
-| 180 ms | 50 ms | low | 20/20 |
-| 833 us | 0 | low | 1/20 |
-| 833 us | 1, 5, 10 ms | high | 20/20 each |
+| 30 ms | 0, 1, 10, 20, 25 ms | low | 1/20 each |
+| 30 ms | 35, 45, 55, 65, 80 ms | high | 20/20 each |
+| 60 ms | 0, 1, 10, 20, 25, 35, 45, 55 ms | low | 1/20 each |
+| 60 ms | 65, 80 ms | high | 20/20 each |
 
-So it takes both: the pin still asserted at re-arm **and** less than roughly
-8 to 10 ms awake since the edge. Either waiting for release or staying awake
-10 ms avoids it. STANDBY0 + FASTWAKE does not show it (20/20 with immediate
-re-arm, 30 ms and 180 ms pulses). The mechanism is not known; upstream's
-low-power notes mention erratum `GPIO_ERR_01` in similar words ("if the pin is
-still asserted when the chip goes back to sleep no further edge is detected"),
-and the errata sheet has not been checked.
+Once deaf, reading the counter over SWD (which forces the chip active for a
+moment) lets exactly one more edge through. The mirror image holds too: stuck
+armed for *rising* with the pin already high, the firmware stayed deaf through
+49 further pulses (next table). STANDBY0 + FASTWAKE does not show it (20/20
+with immediate re-arm). The mechanism is not known; upstream's low-power notes
+mention erratum `GPIO_ERR_01` in similar words ("if the pin is still asserted
+when the chip goes back to sleep no further edge is detected"), and the errata
+sheet has not been checked.
 
-### Re-arm strategies that avoid the deaf state
+### Re-arm strategies
 
-STANDBY1 + FASTWAKE, interrupt re-armed immediately after each edge (the
-failing case above), 20 pulses per cell. "Task wakes" counts every GPIO wake.
+STANDBY1 + FASTWAKE, re-armed immediately after each falling edge.
 
-| Strategy before sleeping again | 833 us | 30 ms | Task wakes |
-|---|---|---|---|
-| plain `wait_for_falling_edge` (baseline) | 1/20 | 1/20 | 1 |
-| read `DIN`, clear the interrupt, read `DIN` and `RIS`, then arm | 1/20 | 1/20 | 1 |
-| if the pin is low, sleep on `wait_for_high` first, then arm falling | 20/20 | 20/20 | 40 |
-| arm both edges (`wait_for_any_edge`), count only when the pin is then low | 20/20 | 20/20 | 40 |
+| Strategy before sleeping again | 833 us, 30 ms (20 each) | Width sweep, 9 to 833 us, 64 widths x 50 pulses |
+|---|---|---|
+| plain `wait_for_falling_edge` | 1/20 | not run |
+| read `DIN`, clear, read `DIN` and `RIS`, then arm (extra reads *before* arming) | 1/20 | not run |
+| check then arm: if the pin is low, `wait_for_high`, then arm falling | 20/20 | **62 of 64**: at 74 and 76 us, 1/50 and stuck asleep waiting for a rise that had already happened |
+| arm both edges, count the wake if the pin is then low | 20/20 | 35 of 64: every pulse wakes the chip, but below about 70 us the pin is high again before it can be read, so the edge is misclassified (0/50 counted, 50 wakes) |
+| **arm then check**: arm the edge, read the pin, sleep only if the level agrees with the armed edge | 20/20 | **64 of 64** (3200 pulses) |
 
-An extra read/clear/read makes no difference (upstream's arm sequence is
-already clear, read `RIS`, unmask). What works is making the pin's return to
-high a wake event: either strategy registers every pulse, at the cost of one
-extra wake per pulse, and the chip sleeps while the pin is held. So rising
-edges do wake from STANDBY1 with FASTWAKE. Without FASTWAKE all four give 0/20.
+So:
+
+- The window in check-then-arm is real and was hit. Upstream's
+  `wait_for_high` / `wait_for_low` have this order: they read the level, and
+  only then does `wait_inner` set the polarity and **clear** any latched edge
+  (`gpio.rs` lines 297 to 356). A transition between the read and the clear is
+  latched and then wiped. That race exists without any sleep mode; in
+  STANDBY1 + FASTWAKE the resulting state is also deaf.
+- Arm-then-check has no such window: after the clear, any transition sets
+  `RIS`, so reading the level afterwards is safe. For a falling wait the
+  procedure is: arm falling, read the pin; if it is high, sleep; if it is low
+  and nothing is latched, it was low before arming, so arm rising, read the
+  pin, and sleep only if it is still low. `edge_test` strategy 4.
+- Arming both edges wakes reliably but cannot tell direction for pulses
+  shorter than the wake latency (about 70 us here).
+
+Wake latency from STANDBY1 to the firmware reading the pin is about 70 us
+(from the two thresholds above); in WFI it is about 55 us.
 
 ### Results: timer-based firmware (`lp_blinky*`), 20 pulses at irregular intervals
 
 The realistic case: time driver running, a 50 ms timer debounce after each
-edge, so the interrupt is re-armed 50 ms after the edge. `tools/edge_blinky.py`.
+edge, then plain `wait_for_falling_edge`. `tools/edge_blinky.py`.
 
-| Idle mode | FASTWAKE | 833 us | 30 ms | 82 ms | 180 ms |
-|---|---|---|---|---|---|
-| STANDBY1 (default) | off | 0/20 | 4/20 | | |
-| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 | 20/20 |
-| STANDBY0 | off | 20/20 | 20/20 | 20/20 | 20/20 |
-| STOP2 | off | 20/20 | 20/20 | | |
+| Idle mode | FASTWAKE | 833 us | 3.1 ms | 22.7 ms | 30 ms | 60 ms |
+|---|---|---|---|---|---|---|
+| STANDBY1 (default) | off | 0/20 | | | 2/20, 4/20 | 4/20 |
+| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | off | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP2 | off | 20/20 | | | 20/20 | |
 
-The 4/20 are pulses that happened to span a timer wake: with defaults, an edge
-is only noticed if the pin is still low when the time driver next wakes the
-chip. That is the "hold the button until the LED comes on" behaviour seen by
-hand.
+With defaults, the few that register are pulses that span a timer wake: an
+edge is only noticed if the pin is still low when the time driver next wakes
+the chip. That is the "hold the button until the LED comes on" behaviour seen
+by hand.
+
+The 60 ms column re-arms at 50 ms with the pin still low, i.e. the deaf
+condition, yet scores 20/20 with FASTWAKE. In this firmware a timer always
+fires 100 ms after each press (LED off), after the pin has gone high, and the
+chip then re-enters sleep in a consistent state. So a later wake evidently
+clears the deaf state. An application with no timer due soon would stay deaf
+until the time driver's next tick (up to 1 s); that case was not produced
+here because the probe cannot make pulses longer than 60 ms.
 
 ### Consequences
 
@@ -205,13 +226,29 @@ hand.
   `unstable-pac`), or hold a `WakeGuard::new(SleepLevel::Standby1)` to idle in
   STANDBY0 instead. On this board the idle current is the same either way
   within the measurement's resolution (about 20 pulses/s).
-- With FASTWAKE in STANDBY1, do not re-arm a single-edge wait within about
-  10 ms of the wake while the pin may still be asserted. Wait for the opposite
-  edge first, or arm both edges (table above).
+- With FASTWAKE in STANDBY1, never sleep armed for an edge the pin's current
+  level rules out. Arm first, then read the pin (arm-then-check).
+- `wait_for_high` / `wait_for_low` should check the level after arming, not
+  before, regardless of sleep mode.
 
-Not tested: level waits other than `wait_for_high`, pins other than PA9/PA14, whether a
-timer wake (as opposed to a debug force-active) clears the deaf state, and the
-power cost of FASTWAKE beyond "no change at 0.5 uA resolution".
+Not tested: pins other than PA9/PA14, the power cost of FASTWAKE beyond "no
+change at 0.5 uA resolution", pulses longer than 60 ms, and the deaf state in
+a timer-based application with no timer due.
+
+### Measurement corrections made along the way
+
+- `cortex_m::asm::delay(n)` takes 3 CPU cycles per count on this core
+  (a nominal 3 s measured 9.0 s). Firmware delays were 3x longer than labelled
+  until `spin_us` fixed it. An earlier version of this section gave a table of
+  "awake time before re-arm" in those units and concluded that staying awake
+  about 10 ms avoided the deaf state; that was an artifact (the "10 ms" was
+  30 ms, the end of the pulse) and is replaced by the table above.
+- The XDS110 UART is accurate down to 150 baud (`0x00` = 60.05 ms measured by
+  the firmware) and wrong below it: 110, 75 and 50 baud gave 3.1, 41.4 and
+  22.7 ms instead of 82, 120 and 180 ms. Cells earlier labelled "82 ms" and
+  "180 ms" were 3.1 ms and 22.7 ms and are relabelled.
+- The default-mode matrix cells are unaffected: they wait for the pin to go
+  high, whatever the delay scale.
 
 ### Earlier, wrong readings of this (kept for the record)
 

@@ -14,8 +14,14 @@ use panic_probe as _;
 /// "reset (or power-cycle), then attach within 3 s" always works.
 /// See docs/UNWEDGE.md.
 pub fn attach_window() {
-    // SYSOSC = 32 MHz out of reset; asm::delay counts CPU cycles.
-    cortex_m::asm::delay(3 * 32_000_000);
+    spin_us(3_000_000);
+}
+
+/// Busy-wait with the CPU awake. `cortex_m::asm::delay(n)` takes 3 cycles per
+/// count on Cortex-M0+ (measured: a nominal 3 s came out as 9.0 s), and SYSOSC
+/// is 32 MHz, so one microsecond is 32/3 counts.
+pub fn spin_us(us: u32) {
+    cortex_m::asm::delay(((us as u64 * 32) / 3) as u32);
 }
 
 /// How `blinky` arranges for the button (a GPIO edge) to be seen while idle.
@@ -129,6 +135,9 @@ pub struct BtnStats {
     /// Times the task was woken by any GPIO event (includes rising edges in the
     /// strategies that arm them).
     pub wakes: AtomicU32,
+    /// Default mode only: loop iterations PA9 stayed low after the last edge
+    /// (a relative measure of pulse width; calibrate against a known pulse).
+    pub low_loops: AtomicU32,
 }
 
 #[used]
@@ -140,6 +149,7 @@ pub static BTN_STATS: BtnStats = BtnStats {
     state: AtomicU32::new(0),
     uart: AtomicU32::new(0),
     wakes: AtomicU32::new(0),
+    low_loops: AtomicU32::new(0),
 };
 
 /// Test configuration, written over SWD and kept across an NRST reset
@@ -148,12 +158,14 @@ pub static BTN_STATS: BtnStats = BtnStats {
 /// word bits 11:8  idle cap: 0 none (STANDBY1), 1 STANDBY0, 2 STOP2, 3 STOP0, 4 WFI only
 ///      bit 0      set GPIOA.FASTWAKE for both test pins
 ///      bit 1      go back to sleep immediately, without waiting for the pin to go high
-///      bits 31:16 (with bit 1) stay awake this many x 10 us after the edge before re-arming
+///      bits 31:16 (with bit 1) stay awake this many x 10 us (true time) after the edge before re-arming
 ///      bits 15:12 (with bit 1) re-arm strategy for PA9:
 ///                 0 plain `wait_for_falling_edge`
 ///                 1 read DIN, clear the interrupt, read DIN and RIS, then as 0
 ///                 2 if the pin is low, sleep until it is high (rising edge), then as 0
 ///                 3 arm both edges; count the wake only if the pin is then low
+///                 4 arm-then-check: arm the edge, then read the pin, and sleep only
+///                   if the level agrees with the armed edge (falling+high, rising+low)
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".uninit.BTN_CFG")]
@@ -169,8 +181,6 @@ pub async fn edge_test() -> ! {
     use embassy_futures::select::{Either, select};
     use embassy_mspm0::gpio::{Input, Level, Output, Pull};
     use embassy_mspm0::sysctl::{SleepLevel, WakeGuard};
-
-    const MS: u32 = 32_000; // CPU cycles per millisecond at 32 MHz
 
     attach_window();
     let p = embassy_mspm0::init(embassy_mspm0::Config::default());
@@ -202,6 +212,42 @@ pub async fn edge_test() -> ! {
 
     let bump = |c: &AtomicU32| c.store(c.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     let strategy = (cfg >> 12) & 0xF;
+    if resleep && strategy == 4 {
+        // Arm-then-check on PA9 only. Invariant on every sleep: the armed edge
+        // and the pin level agree, so no transition can fall between a level
+        // check and the arming of the interrupt.
+        use core::future::{Future, poll_fn};
+        use core::pin::pin;
+        use core::task::Poll;
+        let g = embassy_mspm0::pac::GPIOA;
+        let high = || g.din31_0().read().0 & (1 << 9) != 0;
+        let latched = || g.cpu_int().ris().read().0 & (1 << 9) != 0;
+        loop {
+            {
+                BTN_STATS.state.store(1, Ordering::Relaxed);
+                let mut f = pin!(rx.wait_for_falling_edge());
+                // First poll arms: polarity, clear, pending check, unmask.
+                let armed = poll_fn(|cx| Poll::Ready(f.as_mut().poll(cx))).await;
+                if armed.is_ready() || high() || latched() {
+                    f.await; // armed for falling with the pin high, or the edge is already latched
+                    BTN_STATS.state.store(2, Ordering::Relaxed);
+                    bump(&BTN_STATS.wakes);
+                    bump(&BTN_STATS.uart);
+                    led.toggle();
+                    spin_us((cfg >> 16) * 10);
+                    continue;
+                }
+                // Pin was already low when we armed: a falling edge cannot come until it rises.
+            }
+            let mut r = pin!(rx.wait_for_rising_edge());
+            let armed = poll_fn(|cx| Poll::Ready(r.as_mut().poll(cx))).await;
+            if armed.is_pending() && !high() {
+                BTN_STATS.state.store(3, Ordering::Relaxed);
+                r.await; // armed for rising with the pin low
+                bump(&BTN_STATS.wakes);
+            }
+        }
+    }
     loop {
         if resleep && strategy == 1 {
             let g = embassy_mspm0::pac::GPIOA;
@@ -233,12 +279,17 @@ pub async fn edge_test() -> ! {
         }
         led.toggle();
         if !resleep {
-            cortex_m::asm::delay(20 * MS);
+            let mut n = 0u32;
+            while rx.is_low() {
+                n += 1;
+            }
+            BTN_STATS.low_loops.store(n, Ordering::Relaxed);
+            spin_us(20_000);
             while s2.is_low() || rx.is_low() {}
-            cortex_m::asm::delay(20 * MS);
+            spin_us(20_000);
         } else {
             // Stay awake for (cfg >> 16) x 10 us after the edge before re-arming.
-            cortex_m::asm::delay((cfg >> 16) * (MS / 100));
+            spin_us((cfg >> 16) * 10);
         }
     }
 }

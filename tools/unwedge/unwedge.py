@@ -126,14 +126,14 @@ def peek(d, elf, quiet=False):
             if ap0_alive(d):
                 break
             time.sleep(0.01)
-    magic, mode, s2, state, uart, wakes = (d.mem_read32(addr + 4 * i) for i in range(6))
+    magic, mode, s2, state, uart, wakes, low_loops = (d.mem_read32(addr + 4 * i) for i in range(7))
     g = {n: d.mem_read32(GPIOA + o) for n, o in
          [("DIN", 0x1380), ("RIS", 0x1030), ("IMASK", 0x1028), ("FASTWAKE", 0x1404)]}
     pmode, mclk = d.mem_read32(SYSCTL + 0x1140), d.mem_read32(SYSCTL + 0x1104)
     if gated:
         d.ap_write(PWR_AP, DPREC0, 0)
     d.dp_write(0x4, 0)
-    r = dict(ok=magic == 0xB07C0DE5, mode=mode, s2=s2, uart=uart, wakes=wakes, state=state, gated=gated, dprec=before, **g)
+    r = dict(ok=magic == 0xB07C0DE5, mode=mode, s2=s2, uart=uart, wakes=wakes, low_loops=low_loops, state=state, gated=gated, dprec=before, **g)
     if quiet:
         return r
     if not r["ok"]:

@@ -17,7 +17,7 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 OUT = os.path.join(ROOT, "firmware/target/thumbv6m-none-eabi/release")
 BUILDS = [("lp_blinky", "STANDBY1 (default)", "off"), ("lp_blinky_fastwake", "STANDBY1 (default)", "on"),
           ("lp_blinky_standby0", "STANDBY0", "off"), ("lp_blinky_stop2", "STOP2", "off")]
-SHAPES = [("833 us", 1200, 0xFF), ("30 ms", 300, 0x00)]
+SHAPES = [("833 us", 1200, 0xFF), ("30 ms", 300, 0x00), ("60 ms", 150, 0x00)]  # 150 baud is the lowest accurate rate
 random.seed(1)
 rows = []
 for name, mode, fw in BUILDS:
