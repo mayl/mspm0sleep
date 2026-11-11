@@ -83,30 +83,41 @@ Not verified:
 ## GPIO wake needs FASTWAKE (upstream gap)
 
 `firmware/src/lib.rs::blinky` flashes the LED immediately when the button task
-sees a falling edge on S2 (PA14), so a detected press shows up off the 2 s
-timer grid. Short taps (press and release between flashes), 45 s captures:
+sees a falling edge on S2 (PA14), so a detected press appears off the LED's
+timer grid. Presses were made by hand during the captures.
 
-| Firmware | Difference | Flashes off the timer grid |
-|---|---|---|
-| `lp_blinky` | upstream defaults, idle in STANDBY1 | none: 22 flashes, all exactly 2.00 s apart (`tap_default.bin`) |
-| `lp_blinky_fastwake` | plus `GPIOA.FASTWAKE` bit 14 | many: flashes within the gap after each tap, rate toggles (`tap_fastwake.bin`) |
+| Firmware | Presses (as reported) | Presses registered | When they registered |
+|---|---|---|---|
+| `lp_blinky` (upstream defaults, idle STANDBY1), 90 s, `tap_default.bin` | 15 to 20 short taps, then 3 long holds | 8 | only at timer wakes: five at t = 16.40, 41.38, 48.38, 56.38, 78.38 s (all on a 1.000 s raster), three coincident with an LED-timer wake |
+| `lp_blinky_fastwake` (plus `GPIOA.FASTWAKE` bit 14), 45 s, `tap_fastwake.bin` | about 5 short taps requested | 13 flashes off the grid | at arbitrary phases (x.96, .74, .60, .28, .84, .66, .44, .34, .62, .48 ...), including pairs 0.18 to 0.36 s apart |
 
-Idle floor is the same in both (about 20 pulses/s), so FASTWAKE costs nothing
-measurable here.
+Reading:
 
-With defaults, a press is only registered if the button is still held when the
-time driver next wakes the chip (observed by hand: "hold it until the LED comes
-on"). That fits the edge detector having no clock in STANDBY1. An earlier
-version of this document claimed GPIO wake was verified from a capture where
-the blink rate changed; that capture could not distinguish a GPIO wake from a
-press noticed at the next timer wake, and the claim was wrong.
+- With upstream defaults the GPIO edge does **not** wake the chip. A press is
+  noticed only if the button is still down at the next timer wake. The 1 s
+  raster is the time driver itself: it interrupts every 2^15 ticks of the
+  32768 Hz counter (overflow and half-overflow, `time_driver/tim.rs`), so the
+  chip wakes once a second regardless of pending timers. Roughly 5 of 15 to 20
+  short taps happened to span such an instant; the long holds always do.
+- With FASTWAKE set, presses register asynchronously. The close pairs are
+  switch bounce or the release edge getting past the firmware's 50 ms
+  debounce, i.e. our firmware, not embassy.
+- Idle floor is the same in both (about 20 pulses/s): FASTWAKE costs nothing
+  measurable, and the once-a-second time-driver wake is already inside the
+  1.4 to 1.9 uA figure.
 
 In upstream `embassy-mspm0/src/gpio.rs` nothing writes `FASTWAKE`, and
 "wakeup enable" is a TODO (line 202). Workarounds today: set the bit through
 the PAC as `lp_blinky_fastwake` does, or hold a `WakeGuard` to cap idle at a
 shallower mode (`lp_blinky_standby0`, `lp_blinky_stop2`: built, not yet
-tested). The tap tests rely on a person pressing the button; the baseline run
-has no independent record that taps occurred.
+tested). That the missed edges are due to the edge detector being unclocked in
+STANDBY1 is an inference; the reference manual has not been checked.
+
+History of this section: an earlier version claimed GPIO wake was verified
+from a capture where the blink rate changed; that capture could not
+distinguish a GPIO wake from a press noticed at a timer wake. A first
+"baseline" tap run was also void because no taps were made during it. The
+table above is from the rerun.
 
 ## Corrections to earlier conclusions
 
