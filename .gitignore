@@ -19,3 +19,4 @@ tools/energytrace/repro-cli/target/
 # Claude Code local/runtime state (machine-specific)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+__pycache__/

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Flash a firmware (or leave what's there with FW=-), release all debug holds,
+# and capture EnergyTrace current.   usage: tools/measure.sh <fw-bin|-> <name> [secs]
+# NOSWD=1 skips every step that needs SWD/NRST (for captures taken with the
+# LaunchPad's isolation jumpers pulled); the target is then only restarted by
+# the probe's own ET_DCDC_RestartMCU at the start of the capture.
+# Run inside `nix develop`.
+set -euo pipefail
+ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+FW=$1; NAME=$2; SECS=${3:-10}
+U="$ROOT/tools/unwedge"; CAP="$ROOT/tools/energytrace/captures"
+"$U/replug.sh"                                   # clear any stalled ICDI state
+if [ "$FW" != "-" ]; then
+  case "$FW" in /*) IMG=("$FW" --binary-format bin --base-address 0) ;; *) IMG=("$ROOT/firmware/target/thumbv6m-none-eabi/release/$FW") ;; esac
+  ok=0
+  for _ in 1 2 3; do                              # the probe occasionally fails its first CMSIS-DAP command
+    "$U/unwedge.py" wake
+    if probe-rs download --chip MSPM0L1306 --protocol swd "${IMG[@]}" 2>&1 | grep -q Finished; then ok=1; break; fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || { echo "flash failed" >&2; exit 1; }
+fi
+[ -n "${NOSWD:-}" ] || "$U/unwedge.py" release
+sleep "${SETTLE:-5}"                             # past the firmware's 3 s attach window
+# CAL2 fixed: ET_Calibrate times out (and stalls the probe) when the target is asleep.
+CAL2=${CAL2:-10186} DURATION_SECS=$SECS RAW_OUT="$CAP/$NAME.bin" PLOT_OUT="$CAP/$NAME.png" \
+  "$ROOT/tools/energytrace/repro-cli/target/release/repro-cli" > "/tmp/et_$NAME.log" 2>&1 || { tail -5 "/tmp/et_$NAME.log"; exit 1; }
+"$ROOT/tools/energytrace/floor.py" "$CAP/$NAME.bin"

@@ -1,0 +1,31 @@
+[package]
+edition = "2024"
+name = "mspm0sleep-firmware"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Measurement firmwares for LP-MSPM0L1306, built against upstream embassy
+# (../embassy submodule). Two mutually exclusive executor flavours:
+#   lp  (default) embassy_mspm0::executor::Executor -> STOP/STANDBY on idle
+#   wfi           generic cortex-m executor         -> plain SLEEP (WFE) on idle
+[features]
+default = ["lp"]
+lp = ["embassy-mspm0/executor-thread"]
+wfi = ["embassy-executor/platform-cortex-m", "embassy-executor/executor-thread"]
+
+[dependencies]
+# low-power requires the time driver on TIMG0/TIMG1 (only timers clocked in STANDBY).
+embassy-mspm0 = { path = "../embassy/embassy-mspm0", features = ["mspm0l1306rhb", "defmt", "rt", "time-driver-timg0", "unstable-pac"] }
+embassy-executor = { path = "../embassy/embassy-executor" }
+embassy-time = { path = "../embassy/embassy-time", features = ["defmt"] }
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.0"
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "s"

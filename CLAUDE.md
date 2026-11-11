@@ -52,30 +52,36 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-All Cargo commands must be run inside the Nix development shell to ensure the correct Rust toolchain and cross-compilation targets are available:
+Everything runs inside the Nix dev shell (Rust toolchain with `thumbv6m-none-eabi`, probe-rs, uhubctl, radare2). `bd` is NOT in the shell; it is expected on the host PATH.
 
 ```bash
-# Run cargo via nix develop (recommended)
-nix develop .# --command cargo check --features mspm0l1306rhb
+# firmware (our crate, built against the embassy submodule)
+nix develop .# --command bash -c 'cd firmware && cargo build --release'
+# same idle firmware on the ordinary WFI executor, for comparison
+nix develop .# --command bash -c 'cd firmware && cargo build --release --no-default-features --features wfi --bin lp_idle --target-dir target-wfi'
 
-# Or enter the shell interactively
-nix develop .#
-cargo check --features mspm0l1306rhb
-
-# With direnv, the shell loads automatically on `cd` (see .envrc)
+# flash + release debug holds + EnergyTrace capture + floor summary
+nix develop .# --command tools/measure.sh lp_idle my_capture 20
 ```
 
-This applies to builds, checks, and example compilation across the `embassy/` subtree.
+Do NOT flash with a bare `probe-rs run/download` when the target is asleep: probe-rs 0.32 cannot attach to an MSPM0 in STOP/STANDBY. Use `tools/unwedge/unwedge.py wake` first and `release` afterwards (see `docs/UNWEDGE.md`).
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+- `embassy/` — submodule, **unmodified upstream** embassy (branch `mspm0l_lowpower` on the fork tracks `embassy-rs/embassy` main). Upstream provides MSPM0 deep sleep via `embassy_mspm0::executor::Executor` + the `low-power` feature; our own earlier sleep work was dropped in favour of it.
+- `firmware/` — measurement firmwares for LP-MSPM0L1306 (`lp_idle`, `lp_blinky`, `busy`).
+- `tools/energytrace/repro-cli` — standalone XDS110 EnergyTrace capture (Rust, libusb).
+- `tools/unwedge/` — raw CMSIS-DAP access to MSPM0's PWR-AP: wake a sleeping chip for the debugger, and release it again.
 
 ### Key Documents
 
 | File | Purpose |
 |------|---------|
-| `tools/energytrace/REVERSE_ENGINEERING.md` | USB protocol reverse engineering: libmsp430.so EnergyTrace API, XDS110 interrupt endpoint framing (`0x3e <type> 0d 01`), event record format (eventID=8: current/voltage/energy) |
+| `docs/UNWEDGE.md` | Why SWD "dies" on a sleeping/blank MSPM0, PWR-AP bits, recovery recipe, uhubctl caveat |
+| `docs/LOWPOWER_RESULTS.md` | Upstream embassy low-power verification + EnergyTrace measurements |
+| `docs/CCS_MSPM0_LOWPOWER.md` | What TI CCS Theia does on connect/disconnect, DSSM mailbox commands (from GEL + disassembly) |
+| `tools/energytrace/REVERSE_ENGINEERING.md` | XDS110 EnergyTrace USB protocol notes (historical; later sections supersede earlier ones) |
+| `tools/energytrace/THEIA_VERIFICATION.md` | Those notes checked claim-by-claim against TI's libraries |
 
 ## Conventions & Patterns
 
@@ -86,5 +92,5 @@ _Add your project-specific conventions here_
 The `embassy/` directory is a git submodule pointing to the Embassy fork for this project. AI agents MUST follow these rules when modifying code inside it:
 
 - **No Co-Authored-By lines** in commits within the `embassy/` submodule. Use your standard git config.
-- **Work on feature branches** (e.g. `mspm0l_sleep`) — do not commit directly to `main`.
+- **Work on feature branches** (currently `mspm0l_lowpower`, which is plain upstream) — do not commit directly to `main`. Prefer keeping the submodule unmodified and putting our code in `firmware/`.
 - Commit submodule changes **first** inside `embassy/`, then update the parent repo pointer.
