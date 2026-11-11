@@ -84,14 +84,24 @@ Other ways in, in order of escalation:
    CCS_MSPM0_LOWPOWER.md, taken from TI's GEL script. **Not exercised here**;
    it was not needed, and factory reset rewrites NONMAIN.
 
-## Hub power control: only half works
+## Hub power control (uhubctl)
 
-`uhubctl -l 1-2.3 -p 3 -a off` drops the probe off the bus but does **not**
-remove power from the board: a marker written to target RAM, and the debug halt
-state, survived 15 s "off". The hub is USB3, so it enumerates twice
-(`2109:2817` on bus 1, `2109:0817` on bus 2) and VBUS is only cut when the port
-is off on both. The udev rules grant plugdev access to `2817` only, so
-`uhubctl` cannot see the USB3 half. Fix: match `0817` in both hub rules.
+The LaunchPad sits on port 3 of a VIA VL817 hub. The hub is USB3, so it
+enumerates twice: `2109:2817` on bus 1 (USB2 half, `1-2.3`) and `2109:0817` on
+bus 2 (USB3 half, `2-2.3`). VBUS is only removed when the port is off on
+**both** halves. `uhubctl -l 1-2.3 -p 3 -a off` pairs them automatically, but
+only if it can open both hub devices.
 
-Re-enumerating the USB2 half is still useful: it clears a stalled XDS110 ICDI
-interface (`tools/unwedge/replug.sh`).
+This bit us on 2026-11-11: the udev rules granted plugdev access to `2817`
+only. `uhubctl` then listed two hubs instead of four, the probe dropped off the
+bus on "off", and the port status read `0000 off`, yet the board stayed
+powered. Proof was a marker written to target RAM (and the debug halt state)
+surviving 15 s "off". After widening both hub rules to
+`ATTR{idProduct}=="2817|0817"` and `udevadm trigger --subsystem-match=usb
+--action=change`, the same test loses the marker and the board LEDs go dark.
+
+Do not trust the port status line as evidence of a power cycle; if in doubt
+repeat the RAM-marker test. A quick check is that `uhubctl` lists four hubs.
+
+Re-enumeration alone (even without a real power cut) clears a stalled XDS110
+ICDI interface; `tools/unwedge/replug.sh` does a full off/on.
