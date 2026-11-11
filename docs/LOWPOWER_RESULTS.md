@@ -68,7 +68,7 @@ Verified:
   chip being in STANDBY.
 - **GPIO edges do NOT wake the chip from the default idle state (STANDBY1)
   unless the port's FASTWAKE bit is set for the pin, and upstream never sets
-  it.** See "GPIO wake" below.
+  it.** See "GPIO wake from deep sleep" below.
 
 Not verified:
 
@@ -80,44 +80,132 @@ Not verified:
 - **STOP-level guards.** Nothing here holds a `WakeGuard`, so only the
   no-guard (STANDBY1) path was exercised.
 
-## GPIO wake needs FASTWAKE (upstream gap)
+## GPIO wake from deep sleep (upstream gap)
 
-`firmware/src/lib.rs::blinky` flashes the LED immediately when the button task
-sees a falling edge on S2 (PA14), so a detected press appears off the LED's
-timer grid. Presses were made by hand during the captures.
+Summary: with upstream defaults a GPIO edge does **not** wake the chip from
+STANDBY1, the mode the executor idles in. Setting the port's `FASTWAKE` bit for
+the pin fixes that, with one caveat (below). STOP0/STOP2/STANDBY0 wake without
+it for pulses longer than about one 32 kHz clock period.
 
-| Firmware | Presses (as reported) | Presses registered | When they registered |
-|---|---|---|---|
-| `lp_blinky` (upstream defaults, idle STANDBY1), 90 s, `tap_default.bin` | 15 to 20 short taps, then 3 long holds | 8 | only at timer wakes: five at t = 16.40, 41.38, 48.38, 56.38, 78.38 s (all on a 1.000 s raster), three coincident with an LED-timer wake |
-| `lp_blinky_fastwake` (plus `GPIOA.FASTWAKE` bit 14), 45 s, `tap_fastwake.bin` | about 5 short taps requested | 13 flashes off the grid | at arbitrary phases (x.96, .74, .60, .28, .84, .66, .44, .34, .62, .48 ...), including pairs 0.18 to 0.36 s apart |
+### Method
+
+`firmware/src/bin/edge_test.rs` (`edge_test` in `lib.rs`) is built **without
+the time driver**, so a GPIO edge is the only thing that can wake the chip
+(the time driver otherwise interrupts once a second: overflow and half-overflow
+of its 32768 Hz counter). It counts falling edges on S2 (PA14) and on PA9 and
+toggles LED1. The idle cap (via `WakeGuard`), FASTWAKE and re-arm behaviour are
+set by a config word written over SWD into `.uninit` RAM, then a reset.
+
+Edges on PA9 come from the XDS110 backchannel UART (`tools/unwedge/uart_pulse.py`):
+the line idles high, `0xFF` gives one low pulse of 1 bit time, `0x00` one of
+9 bit times. In the WFI control mode this is exact (20/20 at every width).
+Counters are read with `unwedge.py peek`, which does not halt or reset; each
+cell starts from a reset and is read once, after its pulses.
+`tools/edge_matrix.py` runs the matrix; raw results in
+`tools/energytrace/captures/edge_matrix.json`.
+
+### Results: timer-free firmware, 20 pulses per cell
+
+By default the firmware stays awake until the pin is high again before
+re-arming. "Immediate re-arm" re-arms and sleeps within microseconds of the
+edge, while the pin is still low.
+
+| Idle mode | FASTWAKE | 8.7 us | 833 us | 30 ms | 30 ms, immediate re-arm |
+|---|---|---|---|---|---|
+| WFI (control) | off | 20/20 | 20/20 | 20/20 | 20/20 |
+| WFI (control) | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP0 | off | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP0 | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP2 | off | 5/20 | 20/20 | 20/20 | 20/20 |
+| STOP2 | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | off | 4/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY1 (default) | off | **0/20** | **0/20** | **0/20** | **0/20** |
+| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 | **1/20** |
+
+Manual presses of S2 agree: STANDBY1 without FASTWAKE 0 of 10 (LED never lit,
+counter 0, `RIS` 0 with `IMASK` 1: the edge was never latched); STANDBY1 with
+FASTWAKE 10 of 10; STANDBY0 without FASTWAKE toggled on all 10 (seen, counter
+not read); WFI control read 12 for about 10 presses (bounce or a miscount).
 
 Reading:
 
-- With upstream defaults the GPIO edge does **not** wake the chip. A press is
-  noticed only if the button is still down at the next timer wake. The 1 s
-  raster is the time driver itself: it interrupts every 2^15 ticks of the
-  32768 Hz counter (overflow and half-overflow, `time_driver/tim.rs`), so the
-  chip wakes once a second regardless of pending timers. Roughly 5 of 15 to 20
-  short taps happened to span such an instant; the long holds always do.
-- With FASTWAKE set, presses register asynchronously. The close pairs are
-  switch bounce or the release edge getting past the firmware's 50 ms
-  debounce, i.e. our firmware, not embassy.
-- Idle floor is the same in both (about 20 pulses/s): FASTWAKE costs nothing
-  measurable, and the once-a-second time-driver wake is already inside the
-  1.4 to 1.9 uA figure.
+- **STANDBY1 without FASTWAKE sees nothing**, at any pulse width.
+- **STOP2 and STANDBY0 without FASTWAKE** catch pulses of 833 us and longer but
+  only about a quarter of 8.7 us ones. That is what sampling at 32768 Hz would
+  give (8.7 us / 30.5 us = 28%, i.e. 5.7 of 20 expected; 4 and 5 seen), so edge
+  detection there is evidently clocked by LFCLK. With FASTWAKE all are caught.
+- **STOP0** catches everything.
 
-In upstream `embassy-mspm0/src/gpio.rs` nothing writes `FASTWAKE`, and
-"wakeup enable" is a TODO (line 202). Workarounds today: set the bit through
-the PAC as `lp_blinky_fastwake` does, or hold a `WakeGuard` to cap idle at a
-shallower mode (`lp_blinky_standby0`, `lp_blinky_stop2`: built, not yet
-tested). That the missed edges are due to the edge detector being unclocked in
-STANDBY1 is an inference; the reference manual has not been checked.
+### The STANDBY1 + FASTWAKE caveat
 
-History of this section: an earlier version claimed GPIO wake was verified
-from a capture where the blink rate changed; that capture could not
-distinguish a GPIO wake from a press noticed at a timer wake. A first
-"baseline" tap run was also void because no taps were made during it. The
-table above is from the rerun.
+In that one mode, later edges are lost if the interrupt is re-armed too soon
+after the wake while the pin is still low. After the first edge the firmware is
+deaf; reading the counter over SWD (which forces the chip active for a moment)
+lets exactly one more edge through each time.
+
+| Pulse | Awake time before re-arm | Pin at re-arm | Counted |
+|---|---|---|---|
+| 30 ms | 0, 10, 30, 50, 100, 300 us, 1, 2, 3, 5, 7 ms | low | 1/20 each |
+| 30 ms | 10 ms | low | 20/20 |
+| 180 ms | 50 ms | low | 20/20 |
+| 833 us | 0 | low | 1/20 |
+| 833 us | 1, 5, 10 ms | high | 20/20 each |
+
+So it takes both: the pin still asserted at re-arm **and** less than roughly
+8 to 10 ms awake since the edge. Either waiting for release or staying awake
+10 ms avoids it. STANDBY0 + FASTWAKE does not show it (20/20 with immediate
+re-arm, 30 ms and 180 ms pulses). The mechanism is not known; upstream's
+low-power notes mention erratum `GPIO_ERR_01` in similar words ("if the pin is
+still asserted when the chip goes back to sleep no further edge is detected"),
+and the errata sheet has not been checked.
+
+### Results: timer-based firmware (`lp_blinky*`), 20 pulses at irregular intervals
+
+The realistic case: time driver running, a 50 ms timer debounce after each
+edge, so the interrupt is re-armed 50 ms after the edge. `tools/edge_blinky.py`.
+
+| Idle mode | FASTWAKE | 833 us | 30 ms | 82 ms | 180 ms |
+|---|---|---|---|---|---|
+| STANDBY1 (default) | off | 0/20 | 4/20 | | |
+| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | off | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP2 | off | 20/20 | 20/20 | | |
+
+The 4/20 are pulses that happened to span a timer wake: with defaults, an edge
+is only noticed if the pin is still low when the time driver next wakes the
+chip. That is the "hold the button until the LED comes on" behaviour seen by
+hand.
+
+### Consequences
+
+- Upstream `embassy-mspm0/src/gpio.rs` never writes `FASTWAKE` ("wakeup
+  enable" is a TODO at line 202), so `Input::wait_for_*_edge` cannot wake a
+  low-power-executor application from its default idle mode.
+- Workarounds today: set the bit through the PAC
+  (`pac::GPIOA.fastwake().modify(|w| w.set_din(n, true))`, needs
+  `unstable-pac`), or hold a `WakeGuard::new(SleepLevel::Standby1)` to idle in
+  STANDBY0 instead. On this board the idle current is the same either way
+  within the measurement's resolution (about 20 pulses/s).
+- With FASTWAKE in STANDBY1, do not re-arm an edge wait within about 10 ms of
+  the wake while the pin may still be asserted.
+
+Not tested: rising edges, level waits, pins other than PA9/PA14, whether a
+timer wake (as opposed to a debug force-active) clears the deaf state, and the
+power cost of FASTWAKE beyond "no change at 0.5 uA resolution".
+
+### Earlier, wrong readings of this (kept for the record)
+
+1. A capture where the blink rate changed after button presses was reported as
+   "GPIO wake verified". It could not distinguish a GPIO wake from a press
+   noticed at the next timer wake.
+2. A "baseline" tap capture was read as "taps ignored" when no taps had been
+   made during it.
+3. A STANDBY0 blink capture was read as "worked a few times, then went dead".
+   The presses had most likely all been made in its first seconds; the
+   automated runs show STANDBY0 registering 20/20.
+
+The counter-based test above replaced all three.
 
 ## Corrections to earlier conclusions
 

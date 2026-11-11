@@ -1,0 +1,362 @@
+[
+ {
+  "cap": "WFI (control)",
+  "fastwake": false,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": false,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": false,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": false,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": true,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": true,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": true,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "WFI (control)",
+  "fastwake": true,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": false,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": false,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": false,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": false,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": false,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": true,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": true,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": true,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP0",
+  "fastwake": true,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": false,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 5,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": false,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": false,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": false,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": true,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": true,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": true,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STOP2",
+  "fastwake": true,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": false,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 4,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": false,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": false,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": false,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": true,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": true,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": true,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY0",
+  "fastwake": true,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": false,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 0,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": false,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 0,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": false,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 0,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": false,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 0,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": true,
+  "shape": "8.7 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": true,
+  "shape": "833 us",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": true,
+  "shape": "30 ms",
+  "sent": 20,
+  "counted": 20,
+  "asleep": true,
+  "ris9": 0
+ },
+ {
+  "cap": "STANDBY1 (default)",
+  "fastwake": true,
+  "shape": "30 ms, re-sleep while low",
+  "sent": 20,
+  "counted": 1,
+  "asleep": true,
+  "ris9": 0
+ }
+]

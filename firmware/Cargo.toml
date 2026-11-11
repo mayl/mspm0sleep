@@ -9,8 +9,8 @@ publish = false
 # (../embassy submodule). Two mutually exclusive executor flavours:
 #   lp  (default) embassy_mspm0::executor::Executor -> STOP/STANDBY on idle
 #   wfi           generic cortex-m executor         -> plain SLEEP (WFE) on idle
-# `timer` enables the embassy time driver (TIMG0). The btn_* button-wake tests
-# are built WITHOUT it so that the button is the only possible wake source:
+# `timer` enables the embassy time driver (TIMG0). The edge_test firmware
+# is built WITHOUT it so that the button is the only possible wake source:
 # the time driver interrupts once a second on its own.
 [features]
 default = ["lp", "timer"]
@@ -57,43 +57,8 @@ path = "src/bin/lp_blinky_stop2.rs"
 required-features = ["timer"]
 
 [[bin]]
-name = "btn_sb1"
-path = "src/bin/btn_sb1.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_sb1_fw"
-path = "src/bin/btn_sb1_fw.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_sb0"
-path = "src/bin/btn_sb0.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_sb0_fw"
-path = "src/bin/btn_sb0_fw.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_stop2"
-path = "src/bin/btn_stop2.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_stop2_fw"
-path = "src/bin/btn_stop2_fw.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_stop0"
-path = "src/bin/btn_stop0.rs"
-required-features = ["lp"]
-
-[[bin]]
-name = "btn_wfi"
-path = "src/bin/btn_wfi.rs"
+name = "edge_test"
+path = "src/bin/edge_test.rs"
 required-features = ["lp"]
 
 [profile.release]

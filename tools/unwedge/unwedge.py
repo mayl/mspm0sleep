@@ -10,9 +10,10 @@
                              debug power-up request (required before any
                              current measurement), then pulse NRST
   unwedge.py reset           pulse NRST only
-  unwedge.py peek <elf>      button-wake test readout: read the BTN_STATS counters
-                             and GPIO/SYSCTL state WITHOUT halting or resetting
-                             (forces active only for the read, then lets go)
+  unwedge.py peek <elf>      edge_test readout: counters and GPIO/SYSCTL state,
+                             WITHOUT halting or resetting (forces active only
+                             for the read, then lets go)
+  unwedge.py cfg <elf> <w>   write the edge_test config word and reset
   unwedge.py watch [secs]    after an NRST pulse, poll how long the AHB-AP
                              stays reachable (read-only apart from the reset)
 
@@ -104,10 +105,17 @@ def elf_symbol(path, name):
 
 
 GPIOA = 0x400A0000
-CAPS = {0: "STANDBY1 (no guard)", 1: "STANDBY0", 2: "STOP2", 3: "STOP0", 4: "WFI only"}
+CAPS = {0: "STANDBY1", 1: "STANDBY0", 2: "STOP2", 3: "STOP0", 4: "WFI"}
 
 
-def peek(d, elf):
+def describe(word):
+    return "%s%s%s%s" % (CAPS.get((word >> 8) & 0xF, "?"), " +FASTWAKE" if word & 1 else "",
+                         (" +re-arm %d us after edge, no release wait" % ((word >> 16) * 10)) if word & 2 else "",
+                         " [timer-based blinky]" if word & 0x10 else "")
+
+
+def peek(d, elf, quiet=False):
+    """Read the edge_test counters and pin state without halting or resetting."""
     addr = elf_symbol(elf, "BTN_STATS")
     d.connect()
     before = d.ap_read(PWR_AP, DPREC0)
@@ -118,25 +126,44 @@ def peek(d, elf):
             if ap0_alive(d):
                 break
             time.sleep(0.01)
-    magic, mode, presses, state = (d.mem_read32(addr + 4 * i) for i in range(4))
-    bit = lambda v: (v >> 14) & 1
+    magic, mode, s2, state, uart = (d.mem_read32(addr + 4 * i) for i in range(5))
     g = {n: d.mem_read32(GPIOA + o) for n, o in
-         [("DIN", 0x1380), ("RIS", 0x1030), ("IMASK", 0x1028), ("MIS", 0x1038), ("FASTWAKE", 0x1404)]}
+         [("DIN", 0x1380), ("RIS", 0x1030), ("IMASK", 0x1028), ("FASTWAKE", 0x1404)]}
     pmode, mclk = d.mem_read32(SYSCTL + 0x1140), d.mem_read32(SYSCTL + 0x1104)
     if gated:
         d.ap_write(PWR_AP, DPREC0, 0)
     d.dp_write(0x4, 0)
-    if magic != 0xB07C0DE5:
-        print("BTN_STATS magic %#010x: firmware not running button_count (yet)" % magic)
-        return
-    print("mode      idle cap %s, FASTWAKE %s" % (CAPS.get(mode >> 8, "?"), "on" if mode & 1 else "off"))
-    print("presses   %d registered" % presses)
-    print("state     %s" % {1: "idle, waiting for an edge", 2: "awake, waiting for release"}.get(state, state))
+    r = dict(ok=magic == 0xB07C0DE5, mode=mode, s2=s2, uart=uart, state=state, gated=gated, dprec=before, **g)
+    if quiet:
+        return r
+    if not r["ok"]:
+        print("BTN_STATS magic %#010x: edge_test not running (yet)" % magic)
+        return r
+    print("mode      %s" % describe(mode))
+    print("counts    S2 %d, UART line %d" % (s2, uart))
+    print("state     %s" % {1: "idle, waiting for an edge", 2: "awake, handling an edge"}.get(state, state))
     print("chip      %s (PWR-AP DPREC0 %#010x before the read)" % (
-        "deep sleep, AHB-AP power-gated" if gated else "AHB-AP reachable (awake, SLEEP, or a mode that keeps it powered)", before))
-    print("PA14      pin %s | edge latched (RIS) %d | interrupt unmasked (IMASK) %d | FASTWAKE %d" % (
-        "high (released)" if bit(g["DIN"]) else "LOW (pressed)", bit(g["RIS"]), bit(g["IMASK"]), bit(g["FASTWAKE"])))
+        "deep sleep, AHB-AP power-gated" if gated else "AHB-AP reachable", before))
+    for name, n in (("PA14 S2", 14), ("PA9 UART", 9)):
+        bit = lambda v: (v >> n) & 1
+        print("%-9s pin %s | RIS %d | IMASK %d | FASTWAKE %d" % (
+            name, "high" if bit(g["DIN"]) else "LOW", bit(g["RIS"]), bit(g["IMASK"]), bit(g["FASTWAKE"])))
     print("sysctl    PMODECFG.DSLEEP=%d  MCLKCFG=%#010x" % (pmode & 3, mclk))
+    return r
+
+
+def set_cfg(d, elf, word):
+    """Write the edge_test config word, then reset so the firmware picks it up."""
+    addr = elf_symbol(elf, "BTN_CFG")
+    d.connect()
+    d.ap_write(PWR_AP, DPREC0, FORCEACTIVE)
+    for _ in range(50):
+        if ap0_alive(d):
+            break
+        time.sleep(0.01)
+    d.mem_write32(addr, 0xC0F16A11)
+    d.mem_write32(addr + 4, word)
+    release(d)
 
 
 def pulse_nrst(d):
@@ -188,6 +215,7 @@ def main():
         elif cmd == "release": release(d)
         elif cmd == "reset": d.connect(power=False); pulse_nrst(d); print("NRST pulsed")
         elif cmd == "peek": peek(d, sys.argv[2])
+        elif cmd == "cfg": set_cfg(d, sys.argv[2], int(sys.argv[3], 0))
         elif cmd == "watch": watch(d, float(sys.argv[2]) if len(sys.argv) > 2 else 20)
         else: sys.exit(__doc__)
     finally:

@@ -60,9 +60,9 @@ nix develop .# --command bash -c 'cd firmware && cargo build --release'
 # same idle firmware on the ordinary WFI executor, for comparison
 nix develop .# --command bash -c 'cd firmware && cargo build --release --no-default-features --features wfi,timer --bin lp_idle --target-dir target-wfi'
 
-# button-wake test firmwares (no time driver) + SWD readout of the press counter
+# GPIO edge-wake test (no time driver): build+flash, then run the automated matrix
 nix develop .# --command tools/button_test.sh build
-nix develop .# --command tools/button_test.sh flash sb1     # then press S2, then: ... read sb1
+nix develop .# --command python3 tools/edge_matrix.py 20      # pulses PA9 from the XDS110 UART
 
 # flash + release debug holds + EnergyTrace capture + floor summary
 nix develop .# --command tools/measure.sh lp_idle my_capture 20
