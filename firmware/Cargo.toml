@@ -9,16 +9,20 @@ publish = false
 # (../embassy submodule). Two mutually exclusive executor flavours:
 #   lp  (default) embassy_mspm0::executor::Executor -> STOP/STANDBY on idle
 #   wfi           generic cortex-m executor         -> plain SLEEP (WFE) on idle
+# `timer` enables the embassy time driver (TIMG0). The btn_* button-wake tests
+# are built WITHOUT it so that the button is the only possible wake source:
+# the time driver interrupts once a second on its own.
 [features]
-default = ["lp"]
+default = ["lp", "timer"]
+timer = ["embassy-mspm0/time-driver-timg0", "dep:embassy-time"]
 lp = ["embassy-mspm0/executor-thread"]
 wfi = ["embassy-executor/platform-cortex-m", "embassy-executor/executor-thread"]
 
 [dependencies]
 # low-power requires the time driver on TIMG0/TIMG1 (only timers clocked in STANDBY).
-embassy-mspm0 = { path = "../embassy/embassy-mspm0", features = ["mspm0l1306rhb", "defmt", "rt", "time-driver-timg0", "unstable-pac"] }
+embassy-mspm0 = { path = "../embassy/embassy-mspm0", features = ["mspm0l1306rhb", "defmt", "rt", "unstable-pac"] }
 embassy-executor = { path = "../embassy/embassy-executor" }
-embassy-time = { path = "../embassy/embassy-time", features = ["defmt"] }
+embassy-time = { path = "../embassy/embassy-time", features = ["defmt"], optional = true }
 embassy-sync = { path = "../embassy/embassy-sync" }
 embassy-futures = { path = "../embassy/embassy-futures" }
 cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
@@ -26,6 +30,71 @@ cortex-m-rt = "0.7.0"
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+
+[[bin]]
+name = "lp_idle"
+path = "src/bin/lp_idle.rs"
+required-features = ["timer"]
+
+[[bin]]
+name = "lp_blinky"
+path = "src/bin/lp_blinky.rs"
+required-features = ["timer"]
+
+[[bin]]
+name = "lp_blinky_fastwake"
+path = "src/bin/lp_blinky_fastwake.rs"
+required-features = ["timer"]
+
+[[bin]]
+name = "lp_blinky_standby0"
+path = "src/bin/lp_blinky_standby0.rs"
+required-features = ["timer"]
+
+[[bin]]
+name = "lp_blinky_stop2"
+path = "src/bin/lp_blinky_stop2.rs"
+required-features = ["timer"]
+
+[[bin]]
+name = "btn_sb1"
+path = "src/bin/btn_sb1.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_sb1_fw"
+path = "src/bin/btn_sb1_fw.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_sb0"
+path = "src/bin/btn_sb0.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_sb0_fw"
+path = "src/bin/btn_sb0_fw.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_stop2"
+path = "src/bin/btn_stop2.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_stop2_fw"
+path = "src/bin/btn_stop2_fw.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_stop0"
+path = "src/bin/btn_stop0.rs"
+required-features = ["lp"]
+
+[[bin]]
+name = "btn_wfi"
+path = "src/bin/btn_wfi.rs"
+required-features = ["lp"]
 
 [profile.release]
 debug = 2

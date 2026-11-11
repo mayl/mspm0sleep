@@ -11,14 +11,8 @@ FW=$1; NAME=$2; SECS=${3:-10}
 U="$ROOT/tools/unwedge"; CAP="$ROOT/tools/energytrace/captures"
 "$U/replug.sh"                                   # clear any stalled ICDI state
 if [ "$FW" != "-" ]; then
-  case "$FW" in /*) IMG=("$FW" --binary-format bin --base-address 0) ;; *) IMG=("$ROOT/firmware/target/thumbv6m-none-eabi/release/$FW") ;; esac
-  ok=0
-  for _ in 1 2 3; do                              # the probe occasionally fails its first CMSIS-DAP command
-    "$U/unwedge.py" wake
-    if probe-rs download --chip MSPM0L1306 --protocol swd "${IMG[@]}" 2>&1 | grep -q Finished; then ok=1; break; fi
-    sleep 1
-  done
-  [ "$ok" = 1 ] || { echo "flash failed" >&2; exit 1; }
+  case "$FW" in /*) IMG="$FW" ;; *) IMG="$ROOT/firmware/target/thumbv6m-none-eabi/release/$FW" ;; esac
+  "$ROOT/tools/flash.sh" "$IMG" >/dev/null
 fi
 [ -n "${NOSWD:-}" ] || "$U/unwedge.py" release
 sleep "${SETTLE:-5}"                             # past the firmware's 3 s attach window

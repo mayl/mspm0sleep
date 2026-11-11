@@ -58,7 +58,11 @@ Everything runs inside the Nix dev shell (Rust toolchain with `thumbv6m-none-eab
 # firmware (our crate, built against the embassy submodule)
 nix develop .# --command bash -c 'cd firmware && cargo build --release'
 # same idle firmware on the ordinary WFI executor, for comparison
-nix develop .# --command bash -c 'cd firmware && cargo build --release --no-default-features --features wfi --bin lp_idle --target-dir target-wfi'
+nix develop .# --command bash -c 'cd firmware && cargo build --release --no-default-features --features wfi,timer --bin lp_idle --target-dir target-wfi'
+
+# button-wake test firmwares (no time driver) + SWD readout of the press counter
+nix develop .# --command tools/button_test.sh build
+nix develop .# --command tools/button_test.sh flash sb1     # then press S2, then: ... read sb1
 
 # flash + release debug holds + EnergyTrace capture + floor summary
 nix develop .# --command tools/measure.sh lp_idle my_capture 20
