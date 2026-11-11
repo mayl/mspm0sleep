@@ -22,7 +22,9 @@ if [ "$FW" != "-" ]; then
 fi
 [ -n "${NOSWD:-}" ] || "$U/unwedge.py" release
 sleep "${SETTLE:-5}"                             # past the firmware's 3 s attach window
-# CAL2 fixed: ET_Calibrate times out (and stalls the probe) when the target is asleep.
-CAL2=${CAL2:-10186} DURATION_SECS=$SECS RAW_OUT="$CAP/$NAME.bin" PLOT_OUT="$CAP/$NAME.png" \
-  "$ROOT/tools/energytrace/repro-cli/target/release/repro-cli" > "/tmp/et_$NAME.log" 2>&1 || { tail -5 "/tmp/et_$NAME.log"; exit 1; }
-"$ROOT/tools/energytrace/floor.py" "$CAP/$NAME.bin"
+LOG="/tmp/et_$NAME.log"
+DURATION_SECS=$SECS RAW_OUT="$CAP/$NAME.bin" PLOT_OUT="$CAP/$NAME.png" \
+  "$ROOT/tools/energytrace/repro-cli/target/release/repro-cli" > "$LOG" 2>&1 || { tail -5 "$LOG"; exit 1; }
+# repro-cli prints "CAL nA_per_pps=<k> x0_pps=<x0>" from its two-point calibration.
+read -r K X0 < <(sed -n 's/^CAL nA_per_pps=\([0-9.]*\) x0_pps=\([0-9.]*\)/\1 \2/p' "$LOG")
+"$ROOT/tools/energytrace/floor.py" "$CAP/$NAME.bin" "$K" "$X0"

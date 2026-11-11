@@ -28,20 +28,17 @@
 //!   DECODE_IN=<path> (verified: both committed captures account for every
 //!   byte, resync_bytes == 0x5c marker count, zero carry remaining).
 //!
-//! Conversion:
-//!   pulse_rate_hz = sum(byte[2]) / measurement_seconds
-//!   current_nA    = pulse_rate_hz * 1_000_000 / cal2
-//!   current_µA    = current_nA / 1_000
-//!
-//! cal2 is the per-unit calibration scale. We now read it LIVE from the probe
-//! via ET_Calibrate (cmd 0x1e) — verified 2026-05-25 (beads mspm0sleep-dln):
-//! cal2 ≈ 10186 (rock-stable across tickCount), cal1 ≈ 17 (a settling offset).
-//! This is the same constant TI's GetCurrentInNA divides by. The normal flow
-//! auto-calibrates (Step 2); CALIBRATE=1 runs a standalone tickCount probe;
-//! CAL2 overrides; DEFAULT_CAL2 is only the fallback if ET_Calibrate fails.
-//! (TI's full path also reads a `_CalibLoads` reference table from a board-data
-//! .dat file, but the per-unit scale we need is cal2, read directly here. See
-//! REVERSE_ENGINEERING.md §"ET_Calibrate WORKS".)
+//! Conversion (CORRECTED 2026-11-11 against TI's EnergyTrace_MSP432, see
+//! THEIA_VERIFICATION.md; everything above about a "cal2 scale" is superseded):
+//!   pulses are a u16 LE in bytes 2..3; a `0x34 <rate u16>` config record
+//!   leads the stream and the 10 pulse records after it are discarded.
+//!   ET_Calibrate(selector) returns (pulses, time ticks): selector 1 switches
+//!   in a 2200 ohm reference (1.5 mA at 3.3 V), selector 0 is open.
+//!   I_nA = (pulses_per_s - x0) * 1_500_000 / (x1 - x0)
+//! Measured on this probe (hardware 0x28): ~494 nA per pulse/s, x0 ~16 pulses/s.
+//! The default flow follows TI's order (Version, Setup_Range(0), Setup_Dig(0),
+//! Setup, Calibrate(1), Calibrate(0), Start). LEGACY_FLOW=1 / CAL2= / CALIBRATE=1
+//! keep the old behaviour for comparison; their numbers are low by ~5x.
 
 use plotters::prelude::*;
 use rusb::{Context, DeviceHandle, UsbContext};
@@ -583,6 +580,58 @@ fn xds_eeprom_read(
     Err("XDS_EEPROMRead: all retries exhausted".into())
 }
 
+/// XDS_Version (cmd 0x03): returns (firmware version, hardware version).
+fn xds_version(xds: &Xds110Handle) -> Result<(u32, u16), Box<dyn std::error::Error>> {
+    let tx = IcdiPacket::new(0x03, &[]);
+    let mut rx = IcdiPacket::new(0, &[]);
+    rx.buf.fill(0);
+    icdi_send(xds, &tx)?;
+    let n = icdi_recv(xds, &mut rx)?;
+    if n < 13 || rx.buf[0] != SYNC_BYTE || rx.response_status() != 0 {
+        return Err(format!("XDS_Version failed: {n} bytes, {:02x?}", &rx.buf[..n.min(16)]).into());
+    }
+    let fw = u32::from_le_bytes([rx.buf[7], rx.buf[8], rx.buf[9], rx.buf[10]]);
+    let hw = u16::from_le_bytes([rx.buf[11], rx.buf[12]]);
+    Ok((fw, hw))
+}
+
+fn ti_cal(xds: &Xds110Handle) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== TI-ORDER SETUP + CALIBRATION ===");
+    dap_reset(xds);
+    println!("  XDS_ConnectET status = {}", et_connect(xds)?);
+    let (fw, hw) = xds_version(xds)?;
+    println!("  XDS_Version: firmware=0x{fw:08x} hardware=0x{hw:04x}");
+    let rate = env_u32("SAMPLE_RATE", 10000);
+    println!("  ET_Setup_Range(0) status = {}", et_setup_range(xds, 0)?);
+    println!("  ET_Setup_Dig(0) status = {}", icdi_execute(xds, 0x31, &[0], 2)?);
+    println!("  ET_Setup status = {}", et_setup(xds, 0, rate, 0, 0)?);
+    let sels = std::env::var("SELECTORS").unwrap_or_else(|_| "1,0".into());
+    let mut pts: Vec<(u16, f64)> = Vec::new();
+    for sel in sels.split(',').filter_map(|v| v.trim().parse::<u16>().ok()) {
+        match et_calibrate_once(xds, sel) {
+            Ok(Some((pulses, ticks))) => {
+                let x = pulses as f64 * rate as f64 / (1000.0 * ticks.max(1) as f64);
+                println!("  selector {sel}: pulses={pulses} timeTicks={ticks} -> x={x:.6} pulses/ms");
+                pts.push((sel, x));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                println!("  selector {sel}: {e}");
+                break;
+            }
+        }
+    }
+    let x1 = pts.iter().find(|p| p.0 == 1).map(|p| p.1);
+    let x0 = pts.iter().find(|p| p.0 == 0).map(|p| p.1);
+    if let (Some(x1), Some(x0)) = (x1, x0) {
+        // TI: I_nA = (x - x0) * (3300 mV / 2200 ohm = 1_500_000 nA) / (x1 - x0)
+        let na_per_pps = 1_500_000.0 / ((x1 - x0) * 1000.0);
+        println!("  TI two-point fit: {na_per_pps:.2} nA per (pulse/s), zero offset x0 = {:.3} pulses/s", x0 * 1000.0);
+        println!("  (old model: 1e6/cal2 = {:.2} nA per (pulse/s))", 1e6 / DEFAULT_CAL2);
+    }
+    Ok(())
+}
+
 fn et_setup(
     xds: &Xds110Handle,
     mode: u8,
@@ -743,6 +792,10 @@ struct EtDecoder {
     marker_count: u64,
     /// Total non-`0x70` bytes skipped to realign (includes the markers).
     resync_bytes: u64,
+    /// Pulse records still to be ignored. TI's decoder drops the first 10
+    /// pulse records after a config record (`0x34 <rate u16>`): the first
+    /// carries a junk count. See THEIA_VERIFICATION.md.
+    discard: u32,
 }
 
 impl EtDecoder {
@@ -756,6 +809,7 @@ impl EtDecoder {
             pulse_total: 0,
             marker_count: 0,
             resync_bytes: 0,
+            discard: 10,
         }
     }
 
@@ -773,6 +827,13 @@ impl EtDecoder {
 
         let mut i = 0usize;
         while i + 4 <= data.len() {
+            if data[i] == 0x34 {
+                // Config record: header + u16 sample rate. Restart the discard.
+                self.discard = 10;
+                self.resync_bytes += 3;
+                i += 3;
+                continue;
+            }
             if data[i] != 0x70 {
                 // Not a frame marker. 0x5c is the documented window-counter-
                 // wrap marker; anything else is header residue or noise.
@@ -786,7 +847,14 @@ impl EtDecoder {
             }
             let chunk = &data[i..i + 4];
             self.sample_count += 1;
-            self.pulse_total += chunk[2] as u64;
+            // Pulse count is a u16 LE (byte 3 is its high byte, not flags).
+            let pulses = if self.discard > 0 {
+                self.discard -= 1;
+                0
+            } else {
+                u16::from_le_bytes([chunk[2], chunk[3]]) as u64
+            };
+            self.pulse_total += pulses;
 
             // Advance the window counter by the byte[1] delta (mod 256).
             let b1 = chunk[1];
@@ -807,7 +875,7 @@ impl EtDecoder {
             for _ in 1..step {
                 self.cic.push(0);
             }
-            self.cic.push(chunk[2] as u64);
+            self.cic.push(pulses);
             i += 4;
         }
         // Keep whatever remains (a <4-byte partial sample, or trailing
@@ -944,7 +1012,7 @@ fn decode_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Read {} bytes from {path}", bytes.len());
 
     // Skip the 8-byte timestamp header that leads the first URB in the capture.
-    let payload = if bytes.len() > 8 { &bytes[8..] } else { &bytes[..] };
+    let payload = &bytes[..];
     let mut dec = EtDecoder::new(windows_per_bin, cic_order);
     dec.feed(payload);
 
@@ -1274,6 +1342,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return r;
     }
 
+    // TI_CAL mode (TI_CAL=1): reproduce the setup + calibration order that
+    // EnergyTrace_MSP432 uses (see THEIA_VERIFICATION.md) and print the raw
+    // numbers. No DCDC commands. ET_Calibrate's argument is a LOAD SELECTOR
+    // (1 = 2200 ohm reference, 0 = open), and it returns (pulses, time ticks).
+    if std::env::var("TI_CAL").is_ok() {
+        let r = ti_cal(&xds);
+        let _ = xds.handle.release_interface(CMD_IFACE);
+        let _ = xds.handle.release_interface(DATA_IFACE);
+        return r;
+    }
+
     // CALIBRATE mode (CALIBRATE=1): probe ET_Calibrate for real cal1/cal2.
     if std::env::var("CALIBRATE").is_ok() {
         let r = calibrate_probe(&xds);
@@ -1305,11 +1384,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // these, the probe streams sample-counter ticks but doesn't actually
     // measure target current. Equivalent of MSP430_VCC(3300) in the libmsp430
     // (XDS110 pre-v3) flow.
-    println!("\n--- Step 1b: DCDC init ---");
-    let status = et_dcdc_set_vcc(&xds, 3300)?;
-    println!("  ET_DCDC_SetVcc status = {status}");
-    let status = et_dcdc_restart(&xds)?;
-    println!("  ET_DCDC_RestartMCU status = {status}");
+    // Default flow follows EnergyTrace_MSP432 (THEIA_VERIFICATION.md):
+    // Version, Setup_Range(0), Setup_Dig(0), Setup, Calibrate(1), Calibrate(0).
+    // LEGACY_FLOW=1 restores the pre-2026-11 order (DCDC SetVcc/RestartMCU,
+    // which TI never sends on this path, and the single-constant scale).
+    let legacy = std::env::var("LEGACY_FLOW").is_ok();
+    let sample_rate: u32 = env_u32("SAMPLE_RATE", 10000);
+    let mut ti_cal: Option<(f64, f64)> = None;
+    if legacy {
+        println!("\n--- Step 1b: DCDC init (legacy) ---");
+        let status = et_dcdc_set_vcc(&xds, 3300)?;
+        println!("  ET_DCDC_SetVcc status = {status}");
+        let status = et_dcdc_restart(&xds)?;
+        println!("  ET_DCDC_RestartMCU status = {status}");
+    } else {
+        println!("\n--- Step 1b: Version + setup (TI order) ---");
+        let (fw, hw) = xds_version(&xds)?;
+        println!("  XDS_Version: firmware=0x{fw:08x} hardware=0x{hw:04x}");
+        if hw != 0x28 && hw != 0x2d {
+            return Err(format!("probe hardware 0x{hw:04x}: the 2200 ohm reference-load assumption only holds for 0x28/0x2d").into());
+        }
+        et_setup_range(&xds, 0)?;
+        icdi_execute(&xds, 0x31, &[0], 2)?; // ET_Setup_Dig(0)
+        et_setup(&xds, 0, sample_rate, 0, 0)?;
+        // Two-point calibration: selector 1 = 2200 ohm reference (1.5 mA at
+        // 3.3 V), selector 0 = open. Each returns (pulses, time ticks).
+        let pps = |sel: u16| -> Result<f64, Box<dyn std::error::Error>> {
+            match et_calibrate_once(&xds, sel)? {
+                Some((pulses, ticks)) => Ok(pulses as f64 * sample_rate as f64 / ticks.max(1) as f64),
+                None => Err("ET_Calibrate refused".into()),
+            }
+        };
+        let (x1, x0) = (pps(1)?, pps(0)?);
+        let na_per_pps = 1_500_000.0 / (x1 - x0);
+        println!("  calibration: load {x1:.1} pulses/s, open {x0:.1} pulses/s -> {na_per_pps:.2} nA per (pulse/s)");
+        println!("CAL nA_per_pps={na_per_pps:.4} x0_pps={x0:.4}");
+        // Express TI's fit in the existing affine Calib model:
+        // I = pps * 1e6/cal2 - cal1 * 1e6/cal2  with cal2 = 1e6/k, cal1 = x0.
+        ti_cal = Some((x0, 1e6 / na_per_pps));
+    }
 
     // 2. Calibrate — read the probe's real calibration constant LIVE via
     // ET_Calibrate (cmd 0x1e), mirroring EnergyTrace_LPRF::PerformCalibration.
@@ -1327,6 +1440,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // default cal1 to 0 (CAL1 below can still set one explicitly).
         println!("  cal2 = {c2} nA per (pulse/s) (CAL2 override); cal1 defaults to 0");
         (0.0, c2)
+    } else if let Some(c) = ti_cal {
+        c
     } else {
         match et_calibrate_once(&xds, 1000) {
             Ok(Some((c1, c2))) => {
@@ -1365,8 +1480,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(10000);
     let dig_mode: u8 = 0;
     let dig_enable: u8 = 0;
-    let status = et_setup(&xds, mode, sample_rate, dig_mode, dig_enable)?;
-    println!("  status = {status}");
+    if legacy {
+        let status = et_setup(&xds, mode, sample_rate, dig_mode, dig_enable)?;
+        println!("  status = {status}");
+    }
 
     // 3b. ET_Setup_Range — selects current sense range. Optional; only sent
     // if the RANGE env var is set. Plausible values: 0 (low-current) and 1
@@ -1444,11 +1561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // bytes can't be mistaken for a sample. Subsequent URBs start
                 // directly at sample 0. The decoder resyncs internally, so a
                 // stray byte here is harmless, but skipping is exact.
-                let payload = if urb_count == 1 && n > 8 {
-                    &buf[8..n]
-                } else {
-                    &buf[..n]
-                };
+                let payload = &buf[..n];
                 dec.feed(payload);
 
                 if urb_count <= 2 {

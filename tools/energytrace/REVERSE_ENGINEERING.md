@@ -1,5 +1,15 @@
 # EnergyTrace Protocol Reverse Engineering
 
+> **Read [THEIA_VERIFICATION.md](THEIA_VERIFICATION.md) first (2026-11-11).** These notes were
+> checked claim by claim against TI's libraries and several conclusions below are wrong, in
+> particular everything about calibration: `ET_Calibrate` takes a *load selector* (1 = 2200 ohm
+> reference, 0 = open) and returns (pulses, time ticks); "cal2 = 10186" is a duration, not a scale;
+> currents computed as `pulses/s * 1e6 / cal2` are low by about 5x. The relevant TI class is
+> `EnergyTrace_MSP432`, not `EnergyTrace_LPRF`. Probe hardware version is 0x28 (read via
+> `XDS_Version`), and the two-point calibration was confirmed on the hardware: 494 nA per pulse/s.
+> The sections below are kept as a historical record.
+
+
 ## Objective
 
 Reverse-engineer the USB protocol used by TI's EnergyTrace hardware to measure current/voltage/energy on MSPM0 and MSP430 targets, so we can build a standalone CLI tool (no CCS, no libmsp430.so dependency).
