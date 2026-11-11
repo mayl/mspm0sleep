@@ -66,6 +66,11 @@ Verified:
   it is the thermistor (below).
 - With J15 removed the target rail idles at about 1.6 uA, consistent with the
   chip being in STANDBY.
+- GPIO wake from deep sleep works. In `lp_blinky_button` (60 s, S2 pressed four
+  times by hand) the LED period switches 2.0 s -> 0.5 s -> 2.0 s -> 0.5 s ->
+  2.0 s, each change taking effect on the next cycle, with the floor between
+  pulses unchanged at about 20 pulses/s. No press was missed in four; that is
+  too few to say anything about erratum GPIO_ERR_01.
 
 Not verified:
 
@@ -74,8 +79,6 @@ Not verified:
   offset is itself a 16-or-17-count measurement. Separating the MCU from the
   remaining jumpered circuits, or resolving 1.0 from 1.5 uA, needs a longer or
   repeated calibration (mspm0sleep-av2).
-- **GPIO wake from deep sleep.** `lp_blinky` has a task waiting on S2 (PA14);
-  nobody has pressed it.
 - **STOP-level guards.** Nothing here holds a `WakeGuard`, so only the
   no-guard (STANDBY1) path was exercised.
 
