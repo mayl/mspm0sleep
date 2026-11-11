@@ -776,8 +776,12 @@ impl Calib {
 struct EtDecoder {
     /// Trailing bytes (<4) from the previous feed, prepended to the next.
     carry: Vec<u8>,
-    /// Last window-counter byte seen, for mod-256 delta tracking.
-    prev_b1: Option<u8>,
+    /// Absolute tick of the last pulse record (heartbeat base + tick byte).
+    prev_b1: Option<u64>,
+    /// Tick base: each 0x5c heartbeat record adds 256 ticks. Counting these
+    /// (rather than inferring wraps from the 8-bit tick byte) keeps time
+    /// correct when pulse records are more than 256 ticks apart.
+    hb_base: u64,
     /// Cumulative window count (each window = one sample period).
     cum_windows: u64,
     /// Multi-stage CIC decimator: lowers the per-window pulse stream to the
@@ -803,6 +807,7 @@ impl EtDecoder {
         Self {
             carry: Vec::with_capacity(8),
             prev_b1: None,
+            hb_base: 0,
             cum_windows: 0,
             cic: Cic::new(cic_order, windows_per_bin),
             sample_count: 0,
@@ -826,7 +831,7 @@ impl EtDecoder {
         data.extend_from_slice(payload);
 
         let mut i = 0usize;
-        while i + 4 <= data.len() {
+        while i + 4 <= data.len() || (i < data.len() && data[i] == 0x5c) {
             if data[i] == 0x34 {
                 // Config record: header + u16 sample rate. Restart the discard.
                 self.discard = 10;
@@ -840,6 +845,7 @@ impl EtDecoder {
                 // Either way, advance one byte to realign.
                 if data[i] == 0x5c {
                     self.marker_count += 1;
+                    self.hb_base += 256;
                 }
                 self.resync_bytes += 1;
                 i += 1;
@@ -857,16 +863,13 @@ impl EtDecoder {
             self.pulse_total += pulses;
 
             // Advance the window counter by the byte[1] delta (mod 256).
-            let b1 = chunk[1];
+            let abs = self.hb_base + chunk[1] as u64;
             let step = match self.prev_b1 {
                 None => 1u64,
-                Some(prev) => {
-                    let d = b1.wrapping_sub(prev);
-                    if d == 0 { 256 } else { d as u64 }
-                }
+                Some(prev) => abs.saturating_sub(prev).max(1),
             };
             self.cum_windows += step;
-            self.prev_b1 = Some(b1);
+            self.prev_b1 = Some(abs.max(self.prev_b1.unwrap_or(0)));
 
             // Feed one input-rate sample per elapsed window. Any windows skipped
             // by a counter jump (dropped samples) carried zero pulses, exactly

@@ -31,8 +31,26 @@ capture: 493.2 to 493.7 nA per pulse/s, open-load offset 15.7 to 16.7 pulses/s.
 | `lp_idle` | upstream low-power executor, idle | 350 | 165 uA |
 | (blank flash) | TI ROM bootloader after its 10 s timeout, STANDBY | 350 | 165 uA |
 | `lp_blinky` | as `lp_idle`, plus LED 100 ms every 2 s | 350 between pulses | 165 uA floor, 371 uA mean |
+| `lp_idle`, **J15 removed** | upstream low-power executor, idle | 19.6 | **1.4 to 1.9 uA** |
 
-Captures: `tools/energytrace/captures/*_upstream.{bin,png}`, `rom_bsl_standby.bin`.
+Captures: `tools/energytrace/captures/*_upstream.{bin,png}`, `rom_bsl_standby.bin`,
+`lp_idle_noJ15.{bin,png}`.
+
+### The 165 uA was the thermistor
+
+J15 ("T.PWR") permanently powers the on-board thermistor divider: R2 10.0 kohm
+from 3V3 to RT1 (TMP6131, 10 kohm) to ground, i.e. 3.3 V / 20 kohm = 165 uA
+(SLAU869E section 2.3.7.1 and Table 2-1, which lists "J15: OFF to remove power to
+thermistor circuitry" for low-power measurement). With J15 pulled and nothing
+else changed, the idle stream falls from 350 to 19.6 pulses/s, against an
+open-load calibration offset of 15.7 to 16.7 pulses/s. Two 60 s captures give
+1.9 uA and 1.4 uA; the difference between them is entirely the calibration
+offset landing on 16 or 17 counts, so read this as about 1.6 uA +/- 0.5.
+
+That figure is still the whole target rail with the J101 isolation block, the
+backchannel UART jumpers (J16/J17), S1 (J11) and the light sensor (J4 to J6)
+installed, so the MCU itself is at or below it. The datasheet's STANDBY figure
+is about 1 uA.
 
 ## What this does and does not show
 
@@ -43,25 +61,23 @@ Verified:
   STANDBY) and the time driver wakes it on schedule (LED pulses every 2 s in
   `lp_blinky_upstream`; `lp_idle` wakes every 5 s).
 - Relative to idling in plain SLEEP, deep sleep removes about 0.98 mA.
-- The idle floor is **identical to the pulse** (350 pulses/s) to TI's own ROM
-  code sitting in STANDBY on the same board. Whatever sets that floor is not
-  embassy.
+- With the board as shipped, the idle floor is **identical to the pulse**
+  (350 pulses/s) to TI's own ROM code sitting in STANDBY, so it is not embassy;
+  it is the thermistor (below).
+- With J15 removed the target rail idles at about 1.6 uA, consistent with the
+  chip being in STANDBY.
 
 Not verified:
 
-- **The MCU's own STANDBY current.** 165 uA is the whole target rail as the
-  board is currently jumpered. It cannot be the chip (datasheet STANDBY is
-  around 1 uA), and it is the same with two unrelated programs. 3.3 V / 20 kohm
-  is 165 uA, which would fit a 10 k thermistor divider across the rail; that is
-  a guess until jumpers are pulled. To test: flash `lp_idle`, remove jumpers
-  one at a time, and run `NOSWD=1 tools/measure.sh - <name> 10` after each.
+- **The MCU-only STANDBY current to better than about 0.5 uA.** With J15 out
+  the rail reads 1.4 to 1.9 uA, but one pulse/s is 0.49 uA and the open-load
+  offset is itself a 16-or-17-count measurement. Separating the MCU from the
+  remaining jumpered circuits, or resolving 1.0 from 1.5 uA, needs a longer or
+  repeated calibration (mspm0sleep-av2).
 - **GPIO wake from deep sleep.** `lp_blinky` has a task waiting on S2 (PA14);
   nobody has pressed it.
 - **STOP-level guards.** Nothing here holds a `WakeGuard`, so only the
   no-guard (STANDBY1) path was exercised.
-- **Accuracy at the low end.** One pulse/s is about 0.5 uA and the open-load
-  offset is about 16 pulses/s (8 uA), so a true 1 uA floor would sit inside the
-  calibration offset. Resolving it needs long captures and a stable offset.
 
 ## Corrections to earlier conclusions
 

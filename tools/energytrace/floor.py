@@ -18,24 +18,32 @@ RATE = 10000
 
 
 def decode(buf):
-    i, last, t, out, discard = 0, None, 0, [], 10   # out: (tick_index, pulses)
-    while i + 4 <= len(buf):
-        if buf[i] == 0x34:
+    """Return [(tick_index, pulses)]. Time comes from heartbeats (each adds 256
+    ticks) plus the record's 8-bit tick byte, so sparse streams (pulse records
+    more than 256 ticks apart, i.e. very low current) keep correct time."""
+    i, base, t0, out, discard, last = 0, 0, None, [], 10, 0
+    while i + 4 <= len(buf) or (i < len(buf) and buf[i] == 0x5C):
+        h = buf[i]
+        if h == 0x34:
             discard = 10
             i += 3
-            continue
-        if buf[i] != 0x70:
+        elif h == 0x5C:
+            base += 256
             i += 1
-            continue
-        ctr = buf[i + 1]
-        pulses = buf[i + 2] | (buf[i + 3] << 8)
-        t += 1 if last is None else ((ctr - last) & 0xFF) or 256
-        last = ctr
-        if discard:
-            discard -= 1
-            pulses = 0
-        out.append((t, pulses))
-        i += 4
+        elif h == 0x70:
+            t = base + buf[i + 1]
+            if t0 is None:
+                t0 = t - 1
+            pulses = buf[i + 2] | (buf[i + 3] << 8)
+            if discard:
+                discard -= 1
+                pulses = 0
+            last = max(last, t - t0)
+            out.append((last, pulses))
+            i += 4
+        else:
+            i += 1
+    out.append((max(last, base - (t0 or 0)), 0))   # extend to the final heartbeat
     return out
 
 
