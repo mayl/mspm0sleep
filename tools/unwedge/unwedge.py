@@ -110,7 +110,7 @@ CAPS = {0: "STANDBY1", 1: "STANDBY0", 2: "STOP2", 3: "STOP0", 4: "WFI"}
 
 def describe(word):
     return "%s%s%s%s" % (CAPS.get((word >> 8) & 0xF, "?"), " +FASTWAKE" if word & 1 else "",
-                         (" +re-arm %d us after edge, no release wait" % ((word >> 16) * 10)) if word & 2 else "",
+                         (" +re-arm %d us after edge, no release wait, strategy %d" % ((word >> 16) * 10, (word >> 12) & 0xF)) if word & 2 else "",
                          " [timer-based blinky]" if word & 0x10 else "")
 
 
@@ -126,22 +126,22 @@ def peek(d, elf, quiet=False):
             if ap0_alive(d):
                 break
             time.sleep(0.01)
-    magic, mode, s2, state, uart = (d.mem_read32(addr + 4 * i) for i in range(5))
+    magic, mode, s2, state, uart, wakes = (d.mem_read32(addr + 4 * i) for i in range(6))
     g = {n: d.mem_read32(GPIOA + o) for n, o in
          [("DIN", 0x1380), ("RIS", 0x1030), ("IMASK", 0x1028), ("FASTWAKE", 0x1404)]}
     pmode, mclk = d.mem_read32(SYSCTL + 0x1140), d.mem_read32(SYSCTL + 0x1104)
     if gated:
         d.ap_write(PWR_AP, DPREC0, 0)
     d.dp_write(0x4, 0)
-    r = dict(ok=magic == 0xB07C0DE5, mode=mode, s2=s2, uart=uart, state=state, gated=gated, dprec=before, **g)
+    r = dict(ok=magic == 0xB07C0DE5, mode=mode, s2=s2, uart=uart, wakes=wakes, state=state, gated=gated, dprec=before, **g)
     if quiet:
         return r
     if not r["ok"]:
         print("BTN_STATS magic %#010x: edge_test not running (yet)" % magic)
         return r
     print("mode      %s" % describe(mode))
-    print("counts    S2 %d, UART line %d" % (s2, uart))
-    print("state     %s" % {1: "idle, waiting for an edge", 2: "awake, handling an edge"}.get(state, state))
+    print("counts    S2 %d, UART line %d (task wakes %d)" % (s2, uart, wakes))
+    print("state     %s" % {1: "idle, waiting for an edge", 2: "awake, handling an edge", 3: "asleep, waiting for the pin to go high"}.get(state, state))
     print("chip      %s (PWR-AP DPREC0 %#010x before the read)" % (
         "deep sleep, AHB-AP power-gated" if gated else "AHB-AP reachable", before))
     for name, n in (("PA14 S2", 14), ("PA9 UART", 9)):

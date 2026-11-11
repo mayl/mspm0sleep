@@ -160,6 +160,24 @@ low-power notes mention erratum `GPIO_ERR_01` in similar words ("if the pin is
 still asserted when the chip goes back to sleep no further edge is detected"),
 and the errata sheet has not been checked.
 
+### Re-arm strategies that avoid the deaf state
+
+STANDBY1 + FASTWAKE, interrupt re-armed immediately after each edge (the
+failing case above), 20 pulses per cell. "Task wakes" counts every GPIO wake.
+
+| Strategy before sleeping again | 833 us | 30 ms | Task wakes |
+|---|---|---|---|
+| plain `wait_for_falling_edge` (baseline) | 1/20 | 1/20 | 1 |
+| read `DIN`, clear the interrupt, read `DIN` and `RIS`, then arm | 1/20 | 1/20 | 1 |
+| if the pin is low, sleep on `wait_for_high` first, then arm falling | 20/20 | 20/20 | 40 |
+| arm both edges (`wait_for_any_edge`), count only when the pin is then low | 20/20 | 20/20 | 40 |
+
+An extra read/clear/read makes no difference (upstream's arm sequence is
+already clear, read `RIS`, unmask). What works is making the pin's return to
+high a wake event: either strategy registers every pulse, at the cost of one
+extra wake per pulse, and the chip sleeps while the pin is held. So rising
+edges do wake from STANDBY1 with FASTWAKE. Without FASTWAKE all four give 0/20.
+
 ### Results: timer-based firmware (`lp_blinky*`), 20 pulses at irregular intervals
 
 The realistic case: time driver running, a 50 ms timer debounce after each
@@ -187,10 +205,11 @@ hand.
   `unstable-pac`), or hold a `WakeGuard::new(SleepLevel::Standby1)` to idle in
   STANDBY0 instead. On this board the idle current is the same either way
   within the measurement's resolution (about 20 pulses/s).
-- With FASTWAKE in STANDBY1, do not re-arm an edge wait within about 10 ms of
-  the wake while the pin may still be asserted.
+- With FASTWAKE in STANDBY1, do not re-arm a single-edge wait within about
+  10 ms of the wake while the pin may still be asserted. Wait for the opposite
+  edge first, or arm both edges (table above).
 
-Not tested: rising edges, level waits, pins other than PA9/PA14, whether a
+Not tested: level waits other than `wait_for_high`, pins other than PA9/PA14, whether a
 timer wake (as opposed to a debug force-active) clears the deaf state, and the
 power cost of FASTWAKE beyond "no change at 0.5 uA resolution".
 

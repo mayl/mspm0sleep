@@ -126,6 +126,9 @@ pub struct BtnStats {
     pub state: AtomicU32,
     /// Falling edges registered on PA9 (driven by the XDS110 backchannel UART TXD).
     pub uart: AtomicU32,
+    /// Times the task was woken by any GPIO event (includes rising edges in the
+    /// strategies that arm them).
+    pub wakes: AtomicU32,
 }
 
 #[used]
@@ -136,6 +139,7 @@ pub static BTN_STATS: BtnStats = BtnStats {
     s2: AtomicU32::new(0),
     state: AtomicU32::new(0),
     uart: AtomicU32::new(0),
+    wakes: AtomicU32::new(0),
 };
 
 /// Test configuration, written over SWD and kept across an NRST reset
@@ -145,6 +149,11 @@ pub static BTN_STATS: BtnStats = BtnStats {
 ///      bit 0      set GPIOA.FASTWAKE for both test pins
 ///      bit 1      go back to sleep immediately, without waiting for the pin to go high
 ///      bits 31:16 (with bit 1) stay awake this many x 10 us after the edge before re-arming
+///      bits 15:12 (with bit 1) re-arm strategy for PA9:
+///                 0 plain `wait_for_falling_edge`
+///                 1 read DIN, clear the interrupt, read DIN and RIS, then as 0
+///                 2 if the pin is low, sleep until it is high (rising edge), then as 0
+///                 3 arm both edges; count the wake only if the pin is then low
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".uninit.BTN_CFG")]
@@ -192,13 +201,35 @@ pub async fn edge_test() -> ! {
     BTN_STATS.magic.store(0xB07C_0DE5, Ordering::Relaxed);
 
     let bump = |c: &AtomicU32| c.store(c.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+    let strategy = (cfg >> 12) & 0xF;
     loop {
+        if resleep && strategy == 1 {
+            let g = embassy_mspm0::pac::GPIOA;
+            let _ = g.din31_0().read();
+            g.cpu_int().iclr().write(|w| w.set_dio(9, true));
+            let _ = g.din31_0().read();
+            let _ = g.cpu_int().ris().read();
+        }
+        if resleep && strategy == 2 && rx.is_low() {
+            BTN_STATS.state.store(3, Ordering::Relaxed);
+            rx.wait_for_high().await;
+            bump(&BTN_STATS.wakes);
+        }
         BTN_STATS.state.store(1, Ordering::Relaxed);
-        let which = select(s2.wait_for_falling_edge(), rx.wait_for_falling_edge()).await;
+        let which = if resleep && strategy == 3 {
+            select(s2.wait_for_falling_edge(), rx.wait_for_any_edge()).await
+        } else {
+            select(s2.wait_for_falling_edge(), rx.wait_for_falling_edge()).await
+        };
         BTN_STATS.state.store(2, Ordering::Relaxed);
+        bump(&BTN_STATS.wakes);
         match which {
             Either::First(()) => bump(&BTN_STATS.s2),
-            Either::Second(()) => bump(&BTN_STATS.uart),
+            Either::Second(()) => {
+                if !(resleep && strategy == 3) || rx.is_low() {
+                    bump(&BTN_STATS.uart)
+                }
+            }
         }
         led.toggle();
         if !resleep {
