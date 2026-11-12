@@ -16,6 +16,11 @@ publish = false
 default = ["lp", "timer"]
 timer = ["embassy-mspm0/time-driver-timg0", "dep:embassy-time"]
 lp = ["embassy-mspm0/executor-thread"]
+# Build against CordlessCoder's embassy branch (mspm0-low-power), where an async
+# input takes the port's interrupt binding: `Input::new_async(pin, Irqs, pull)`,
+# and where the executor only deep-sleeps with `low-power` enabled explicitly
+# (on upstream the executor features imply it).
+cordless-api = ["embassy-mspm0/low-power"]
 wfi = ["embassy-executor/platform-cortex-m", "embassy-executor/executor-thread"]
 
 [dependencies]

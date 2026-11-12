@@ -45,9 +45,9 @@ enum Command {
 
 #[derive(Args)]
 struct ProbeArgs {
-    /// Probe time resolution in ticks per second
-    #[arg(long, default_value_t = 10_000)]
-    rate: u32,
+    /// Probe time resolution in ticks per second [default: 10000; 50000 for `live`]
+    #[arg(long)]
+    rate: Option<u32>,
     /// Print every command sent to the probe
     #[arg(long)]
     verbose: bool,
@@ -250,9 +250,16 @@ fn interrupt_flag() -> Arc<AtomicBool> {
     stop
 }
 
-fn open_session(args: &ProbeArgs) -> Result<Session> {
+/// Tick rate for headless captures.
+const CAPTURE_RATE: u32 = 10_000;
+/// Tick rate for the live display. The probe sends a packet only when it has about 188 bytes, and
+/// while the target sleeps most of those are time-keeping bytes, one per 256 ticks. A faster tick
+/// fills packets sooner: the longest wait for new data drops from about 1.5 s to about 0.7 s.
+const LIVE_RATE: u32 = 50_000;
+
+fn open_session(args: &ProbeArgs, default_rate: u32) -> Result<Session> {
     eprintln!("calibrating...");
-    let session = Session::open(args.rate, args.verbose)?;
+    let session = Session::open(args.rate.unwrap_or(default_rate), args.verbose)?;
     eprintln!(
         "XDS110 hardware {:#04x}, firmware {}; {}",
         session.info.hardware,
@@ -282,7 +289,7 @@ fn pump(session: &mut Session, stop: &AtomicBool, mut sink: impl FnMut(&[u8]) ->
 
 fn capture(args: CaptureArgs) -> Result<()> {
     let stop = interrupt_flag();
-    let mut session = open_session(&args.probe)?;
+    let mut session = open_session(&args.probe, CAPTURE_RATE)?;
     let mut file = File::create(&args.file).map_err(|e| format!("{}: {e}", args.file.display()))?;
     session.meta().save(&args.file)?;
 
@@ -294,11 +301,19 @@ fn capture(args: CaptureArgs) -> Result<()> {
         None => eprintln!("capturing until Ctrl-C..."),
     }
     let flag = stop.clone();
+    let mut done = false;
     pump(&mut session, &stop, |bytes| {
+        // Once the requested length is reached, what is still in flight is dropped, so the capture
+        // ends with the packet that crossed it. That packet can hold over a second of data when the
+        // target is asleep, so a timed capture may run that much long; its true length is reported.
+        if done {
+            return Ok(());
+        }
         file.write_all(bytes)?;
         decoder.feed(bytes, |e| trace.push(e));
         // The capture length is measured on the probe's clock, not the host's.
         if deadline.is_some_and(|d| decoder.now() >= d) {
+            done = true;
             flag.store(true, Ordering::SeqCst);
         }
         Ok(())
@@ -357,7 +372,7 @@ fn live(args: LiveArgs) -> Result<()> {
         let (speed, flag) = (args.speed, stop.clone());
         (scope, std::thread::spawn(move || replay(capture.raw, speed, tx, flag)))
     } else {
-        let mut session = open_session(&args.probe)?;
+        let mut session = open_session(&args.probe, LIVE_RATE)?;
         let mut file = match &args.save {
             Some(path) => {
                 session.meta().save(path)?;
@@ -456,7 +471,7 @@ fn export(args: ExportArgs) -> Result<()> {
 }
 
 fn cal(args: ProbeArgs) -> Result<()> {
-    let session = Session::open(args.rate, args.verbose)?;
+    let session = Session::open(args.rate.unwrap_or(CAPTURE_RATE), args.verbose)?;
     println!("probe hardware   {:#06x}", session.info.hardware);
     println!("probe firmware   {}", session.info.firmware_string());
     println!(

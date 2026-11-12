@@ -201,6 +201,7 @@ pub struct Session {
     pub cal_loaded: (u32, u32),
     pub cal_open: (u32, u32),
     started: bool,
+    opened: Instant,
 }
 
 impl Session {
@@ -270,6 +271,7 @@ impl Session {
             cal_loaded,
             cal_open,
             started: false,
+            opened: Instant::now(),
         })
     }
 
@@ -297,11 +299,18 @@ impl Session {
 
     /// Read stream bytes into `buf`. Returns 0 if nothing arrived within `timeout`.
     ///
-    /// The probe sends a short packet about every 100 ms, which ends the
-    /// transfer, so this returns promptly whatever the size of `buf`.
+    /// The probe sends a packet once it has about 188 bytes to send, and a short packet ends the
+    /// transfer, so this returns as soon as one arrives whatever the size of `buf`. How often that
+    /// is depends on the current: every few milliseconds at milliamps, but only every second or so
+    /// while the target sleeps (see `LIVE_RATE` in `main.rs`).
     pub fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
         match self.usb.handle.read_bulk(EP_DATA_IN, buf, timeout) {
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                if self.usb.verbose {
+                    eprintln!("stream: {n} bytes at {:.3} s", self.opened.elapsed().as_secs_f64());
+                }
+                Ok(n)
+            }
             Err(rusb::Error::Timeout) => Ok(0),
             Err(e) => Err(e.into()),
         }

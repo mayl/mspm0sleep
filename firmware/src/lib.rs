@@ -6,6 +6,30 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use defmt_rtt as _;
 use panic_probe as _;
 
+// On CordlessCoder's embassy branch the GPIO interrupt has to be bound by the application.
+#[cfg(feature = "cordless-api")]
+embassy_mspm0::bind_group_interrupts!(struct Irqs {
+    GPIOA => embassy_mspm0::gpio::InterruptHandler;
+});
+
+/// An input that can wait for edges, on either embassy API.
+#[cfg(feature = "cordless-api")]
+pub type EdgeInput = embassy_mspm0::gpio::Input<'static, embassy_mspm0::mode::Async>;
+#[cfg(not(feature = "cordless-api"))]
+pub type EdgeInput = embassy_mspm0::gpio::Input<'static>;
+
+/// An input with its pull-up on, able to wait for edges, on either embassy API.
+#[allow(unused_macros)]
+macro_rules! pull_up_input {
+    ($pin:expr) => {{
+        #[cfg(feature = "cordless-api")]
+        let input = embassy_mspm0::gpio::Input::new_async($pin, crate::Irqs, embassy_mspm0::gpio::Pull::Up);
+        #[cfg(not(feature = "cordless-api"))]
+        let input = embassy_mspm0::gpio::Input::new($pin, embassy_mspm0::gpio::Pull::Up);
+        input
+    }};
+}
+
 /// Stay in RUN, CPU spinning, for ~3 s after reset before any sleep is allowed.
 ///
 /// Deep sleep makes the SWD port hard to reach; a firmware that sleeps
@@ -44,7 +68,7 @@ static PRESS: embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::Cr
 
 #[cfg(feature = "timer")]
 #[embassy_executor::task]
-async fn button_task(mut s2: embassy_mspm0::gpio::Input<'static>, mut rx: embassy_mspm0::gpio::Input<'static>) {
+async fn button_task(mut s2: EdgeInput, mut rx: EdgeInput) {
     use embassy_futures::select::{Either, select};
     let bump = |c: &AtomicU32| c.store(c.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     loop {
@@ -66,15 +90,15 @@ async fn button_task(mut s2: embassy_mspm0::gpio::Input<'static>, mut rx: embass
 #[cfg(feature = "timer")]
 pub async fn blinky(spawner: embassy_executor::Spawner, wake: ButtonWake) -> ! {
     use embassy_futures::select::{Either, select};
-    use embassy_mspm0::gpio::{Input, Level, Output, Pull};
+    use embassy_mspm0::gpio::{Level, Output};
     use embassy_mspm0::sysctl::{SleepLevel, WakeGuard};
     use embassy_time::Timer;
 
     attach_window();
     let p = embassy_mspm0::init(embassy_mspm0::Config::default());
     let mut led = Output::new(p.PA0, Level::High); // off
-    let s2 = Input::new(p.PA14, Pull::Up);
-    let rx = Input::new(p.PA9, Pull::Up);
+    let s2 = pull_up_input!(p.PA14);
+    let rx = pull_up_input!(p.PA9);
     // Same encoding as BTN_CFG, plus bit 4 = "timer-based blinky firmware".
     BTN_STATS.mode.store(
         0x10 | match wake {
@@ -179,7 +203,7 @@ pub static mut BTN_CFG: [core::mem::MaybeUninit<u32>; 2] = [core::mem::MaybeUnin
 /// with a pin still asserted. Config bit 1 removes that wait.
 pub async fn edge_test() -> ! {
     use embassy_futures::select::{Either, select};
-    use embassy_mspm0::gpio::{Input, Level, Output, Pull};
+    use embassy_mspm0::gpio::{Level, Output};
     use embassy_mspm0::sysctl::{SleepLevel, WakeGuard};
 
     attach_window();
@@ -191,8 +215,8 @@ pub async fn edge_test() -> ! {
     let (cap, fastwake, resleep) = ((cfg >> 8) & 0xF, cfg & 1 != 0, cfg & 2 != 0);
 
     let mut led = Output::new(p.PA0, Level::High); // active low: off
-    let mut s2 = Input::new(p.PA14, Pull::Up);
-    let mut rx = Input::new(p.PA9, Pull::Up);
+    let mut s2 = pull_up_input!(p.PA14);
+    let mut rx = pull_up_input!(p.PA9);
     if fastwake {
         embassy_mspm0::pac::GPIOA.fastwake().modify(|w| {
             w.set_din(14, true);

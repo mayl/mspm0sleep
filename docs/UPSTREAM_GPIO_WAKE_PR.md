@@ -158,3 +158,57 @@ default idle mode. Presses were not counted.
   a separate case; the bounce test below goes through that range without loss.
 - CI itself (only the `embassy-mspm0` build matrix from its `Cargo.toml` and
   `examples/mspm0l1306` were built locally).
+
+## The fix the maintainers pointed to (tested 2026-11-12)
+
+On #7513 a maintainer (i509VCB) said this is known and already fixed by CordlessCoder "in some
+commit" that has not been split out yet, and that it probably has to land after #7326. The code
+is on CordlessCoder's fork, branch `mspm0-low-power` (tip 71f54dfee, 2026-10-22, based on upstream
+main of 2026-10-12). It is not a single commit: the branch is several hundred commits that rework
+most of `embassy-mspm0`. The GPIO wake part starts at 9617fcc4b "MSPM0 Wake from deep sleep on a
+GPIO edge" and is reworked by several dozen later commits to `gpio.rs`.
+
+What it does for GPIO wake, read from the code:
+
+- Sets `FASTWAKE` while a wait is armed and clears it, with the mask and the latched event, when
+  the wait completes or is dropped.
+- For `GPIO_ERR_01` it always detects **both** edges on affected families (`cfg(gpio_err_01)`)
+  and decides the direction in the interrupt handler by reading the pin. This is TI's first
+  workaround; the draft above uses the second.
+- `wait_for_high` / `wait_for_low` re-test the level after arming.
+- The API changes: an async input is `Input::new_async(pin, Irqs, pull)` with the port interrupt
+  bound by the application, and the executor only deep-sleeps with the `low-power` feature
+  enabled explicitly.
+
+To build our firmware against it: `git -C embassy checkout 71f54dfee` (remote `cordless`), then
+add the firmware feature `cordless-api`, e.g.
+`cargo build --release --no-default-features --features lp,cordless-api --bin edge_test --target-dir target-notimer`.
+The first run was made without `low-power`: everything passed, but the per-cell sleep check
+showed the chip had never left plain WFI, so that run was thrown away.
+
+Results, same rig and scripts as above, chip confirmed asleep in every deep-sleep cell:
+
+| Test | Upstream main | CordlessCoder 71f54dfee | Draft `mspm0-gpio-wake` |
+|---|---|---|---|
+| STANDBY1, 833 us and 30 ms pulses | 0/20 | 20/20 | 20/20 |
+| STANDBY1, 30 ms, re-armed while low | 0/20 | 20/20 | 20/20 |
+| 8.7 us pulses, STOP0 | 20/20 | **0/20** | 20/20 |
+| 8.7 us pulses, STOP2 / STANDBY0 | 5/20, 4/20 | **0/20** | 20/20 |
+| 8.7 us pulses, STANDBY1 | 0/20 | **0/20** | 20/20 |
+| Width sweep, plain falling wait, STANDBY1 | not run | lost up to 16 us (0/50), 17 us 15/50, 18 us and up all counted | none lost from 9 us |
+| Width sweep, `wait_for_high` then falling wait | stuck at 74 and 76 us | no stuck state; same loss up to 16 us | none lost |
+| Bounce stress, then 20 clean pulses | not run | 20/20 after every burst width | 20/20 |
+| Pin held low 10 s | not run | asleep throughout, 21 of 21 edges | asleep throughout, 21 of 21 |
+| Timer-based blinky, default idle | 0 to 4/20 | 20/20 at 833 us, 30 ms, 60 ms | 20/20 |
+| Idle floor waiting on two pins | 20 pulses/s | 20 pulses/s | 20 pulses/s |
+
+So their branch fixes the reported problem. The one difference the rig finds is short pulses: a
+pulse that ends before the interrupt handler reads the pin (about 17 us here) is taken for the
+opposite edge and dropped, in every deep-sleep mode including STOP0, where unmodified upstream
+catches it. Their handler has a comment saying exactly this ("A pulse shorter than the handler
+latency ... loses a real edge for `wait_for_rising_edge`"), so it is a known trade-off of the
+both-edges workaround, not an oversight. It does not matter for a button. It would matter for a
+short strobe from another chip.
+
+Raw results: `tools/energytrace/captures/edge_matrix_cordless.json`, `lp_blinky_cordless.*`,
+`lp_idle_cordless.*`. Not tested on their branch: anything other than GPIO wake.

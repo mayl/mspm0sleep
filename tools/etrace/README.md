@@ -61,7 +61,7 @@ cd tools/etrace && cargo build --release
 |---|---|
 | `etrace live` | Live oscilloscope. `--save run.bin` records at the same time. |
 | `etrace view run.bin` | The same oscilloscope over a saved capture. |
-| `etrace capture run.bin --secs 20` | Headless capture, then one line of statistics. Without `--secs` it runs until Ctrl-C. `--png`, `--svg` write a plot next to it. |
+| `etrace capture run.bin --secs 20` | Headless capture, then one line of statistics. Without `--secs` it runs until Ctrl-C. `--png`, `--svg` write a plot next to it. A timed capture ends with the packet that crosses the time, so it can run up to a second or so long; the line reports the true length. |
 | `etrace stats a.bin b.bin` | Statistics for saved captures. `--json` for scripts. |
 | `etrace export run.bin --csv out.csv` | CSV, SVG or PNG from a capture. `--bin-ms` sets the time resolution. |
 | `etrace cal` | Run the probe's calibration and print it. |
@@ -124,6 +124,10 @@ That has consequences worth knowing:
   roughly ±0.5 µA. Readings never go below zero.
 - **The scale was checked against one known load**: a 20 kΩ divider across
   3.3 V (165 µA) reads 164.7 µA.
+- **At low current the live trace advances in steps.** The probe sends data
+  only when it has a packet's worth, which takes up to 0.7 s while the target
+  sleeps. `etrace live` runs the probe at 50 kHz to keep that short; at the
+  10 kHz used for captures it is up to 1.5 s.
 - **What is measured is everything on the target's supply rail**, not just the
   microcontroller. On the LP-MSPM0L1306 the thermistor divider (jumper J15)
   alone draws 165 µA.
