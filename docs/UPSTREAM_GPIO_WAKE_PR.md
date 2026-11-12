@@ -115,6 +115,12 @@ Edges inside the fast bursts are not all counted (20 to 60 of 100 below
 60 us, 100 of 100 from 60 us up), which is expected: they arrive faster than
 the firmware can handle them.
 
+**Pin held low** (`tools/edge_hold.py`, UART break): the firmware counts the
+falling edge, re-arms with the pin still low and so waits for the rising edge
+first. Held for 10 s, the chip was asleep at 5 s and at 10 s (AHB-AP
+power-gated, count still 1), and counted 20/20 pulses after release. Repeated
+with no SWD reads in between (`QUIET=1`): 21 of 21 edges in total.
+
 **Timer-based firmware** (`lp_blinky`, 50 ms timer debounce, default idle
 mode, `tools/edge_blinky.py`): 20/20 at 833 us, 30 ms and 60 ms (before: 0/20,
 2 to 4/20, 4/20).
@@ -149,6 +155,5 @@ should flash the LED at once and toggle the blink rate on every press.
 - Any chip other than the MSPM0L1306, and ports other than GPIOA.
 - GPIO_ERR_01 case 1 (STANDBY0, pin de-asserted for under 3 LFCLK cycles) as
   a separate case; the bounce test below goes through that range without loss.
-- Pulses longer than 60 ms (the probe's UART cannot make them).
 - CI itself (only the `embassy-mspm0` build matrix from its `Cargo.toml` and
   `examples/mspm0l1306` were built locally).
