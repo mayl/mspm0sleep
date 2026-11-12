@@ -155,10 +155,29 @@ Once deaf, reading the counter over SWD (which forces the chip active for a
 moment) lets exactly one more edge through. The mirror image holds too: stuck
 armed for *rising* with the pin already high, the firmware stayed deaf through
 49 further pulses (next table). STANDBY0 + FASTWAKE does not show it (20/20
-with immediate re-arm). The mechanism is not known; upstream's low-power notes
-mention erratum `GPIO_ERR_01` in similar words ("if the pin is still asserted
-when the chip goes back to sleep no further edge is detected"), and the errata
-sheet has not been checked.
+with immediate re-arm).
+
+This is TI erratum **GPIO_ERR_01**, "GPIO wakeup edges can be lost in STANDBY
+mode" (SLAZ741E, MSPM0L110x/L13xx, silicon Rev C and D; same text in SLAZ742H
+for the G parts), checked 2026-11-12:
+
+> Case 1: STANDBY0 wakeup - IF the MCU is set into STANDBY/STOP/SLEEP mode with
+> an IO in "wake" state AND one sets the IO back to the "non-wake" state for
+> < 3 LFCLK cycles and THEN asserts it again, the next wakeup edge will not be
+> detected.
+> Case 2: STANDBY1 wakeup - IF a GPIO edge is used to wakeup AND the GPIO pulse
+> is still active when the device returns to STANDBY1, THEN the device will not
+> detect any subsequent wakeup edges.
+>
+> Workaround, case 1: make sure that the GPIO is de-asserted while the device
+> is in active mode, OR ensure the wakeup pulse is longer than 3 LFCLK cycles.
+> Case 2: set GPIO wakeup edge to both falling and rising edges, OR ensure the
+> GPIO wakeup pulse is not active before entering STANDBY1.
+
+Case 2 is the rule measured above; arm-then-check (below) is its second
+workaround done without a race, and "arm both edges" is its first. The
+erratum does not mention the mirror case (armed rising, pin already high),
+which behaved the same here.
 
 ### Re-arm strategies
 
