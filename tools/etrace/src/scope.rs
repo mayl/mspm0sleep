@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph};
+use ratatui::widgets::{Axis, Block, BorderType, Chart, Clear, Dataset, GraphType, Paragraph};
 use ratatui::{DefaultTerminal, Frame, Terminal};
 
 use crate::cal::{Calibration, SUPPLY_V};
@@ -42,6 +42,93 @@ const MIN_FULL_SCALE_NA: f64 = 1_000.0;
 /// Width reserved for the Y-axis labels, in cells.
 const Y_LABEL_WIDTH: usize = 9;
 
+const TRACE_COLOR: Color = Color::Green;
+const MEAN_COLOR: Color = Color::Yellow;
+
+/// Style for labels, axes and borders.
+fn dim() -> Style {
+    Style::new().fg(Color::DarkGray)
+}
+
+/// A rounded, titled frame.
+fn panel(title: &str) -> Block<'_> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(dim())
+        .title(Line::from(format!(" {title} ")).style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+}
+
+/// What the chart is showing, for the readouts around it.
+struct View {
+    /// The part of the time window that holds data, in ms.
+    start_ms: u64,
+    end_ms: u64,
+    /// Time per plotted point, in ms.
+    width_ms: u64,
+    /// Mean current over the window, in nA.
+    mean: Option<f64>,
+    /// Lowest and highest plotted point, in nA.
+    low: f64,
+    peak: f64,
+}
+
+/// The key reference, drawn over the middle of the screen.
+fn render_help(frame: &mut Frame, area: Rect) {
+    const KEYS: &[(&str, &str)] = &[
+        ("space", "pause and resume; data keeps arriving while paused"),
+        ("+  -", "shorter or longer time span"),
+        (
+            "\u{2190}  \u{2192}",
+            "pan (Shift: by a whole span); panning to the newest data resumes",
+        ),
+        ("Home  End", "oldest and newest data"),
+        ("\u{2191}  \u{2193}", "zoom the current axis in and out"),
+        ("a", "auto-range the current axis"),
+        ("g", "logarithmic current axis"),
+        ("s", "smoothing: average each point over 4, 16 or 64 points"),
+        ("f", "fit the whole trace"),
+        ("r", "restart the totals"),
+        ("q", "quit"),
+    ];
+    const NOTES: &[&str] = &[
+        "The strip under the trace shows everything recorded; the part on",
+        "screen is highlighted. The yellow line is the mean of the window.",
+        "pps = charge pulses per second, what the probe actually counts.",
+    ];
+    let (w, h) = (
+        74.min(area.width),
+        ((KEYS.len() + NOTES.len()) as u16 + 5).min(area.height),
+    );
+    let rect = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    let mut lines = vec![Line::default()];
+    for (key, what) in KEYS {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {key:<11}"),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(*what),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.extend(
+        NOTES
+            .iter()
+            .map(|note| Line::from(Span::styled(format!("  {note}"), dim()))),
+    );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel("Keys").title_bottom(Line::from(" any key closes ").style(dim()).right_aligned())),
+        rect,
+    );
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum YScale {
     Auto,
@@ -70,6 +157,10 @@ pub struct Scope {
     totals_from_ms: u64,
     /// One-line message shown in the header (errors, end of stream).
     message: Option<String>,
+    /// The key reference is showing.
+    help: bool,
+    /// Where the calibration came from, shown under its values.
+    cal_note: String,
 }
 
 impl Scope {
@@ -90,6 +181,8 @@ impl Scope {
             average: 1,
             totals_from_ms: 0,
             message: None,
+            help: false,
+            cal_note: String::new(),
         }
     }
 
@@ -131,6 +224,11 @@ impl Scope {
     /// Put the right edge of the view at `seconds` from the start of the trace.
     pub fn set_end(&mut self, seconds: f64) {
         self.view_end = Some(((seconds * 1000.0) as u64).min(self.trace.end_ms()));
+    }
+
+    /// Say where the calibration came from.
+    pub fn set_cal_note(&mut self, note: impl Into<String>) {
+        self.cal_note = note.into();
     }
 
     pub fn set_log(&mut self, log: bool) {
@@ -193,8 +291,13 @@ impl Scope {
 
     /// Handle a key. Returns false when the scope should close.
     pub fn key(&mut self, key: KeyEvent) -> bool {
+        if self.help {
+            self.help = false;
+            return true;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
+            KeyCode::Char('?') | KeyCode::Char('h') => self.help = true,
             KeyCode::Char('q') | KeyCode::Esc => return false,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
             KeyCode::Char(' ') if self.live => {
@@ -225,11 +328,32 @@ impl Scope {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
-        let [head, body, foot] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(4), Constraint::Length(3)]).areas(frame.area());
+        let area = frame.area();
+        // The stat cards need room; on a short terminal they collapse to one line.
+        let cards_height = if area.height >= 18 { 5 } else { 1 };
+        let [head, body, strip, cards, keys] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(cards_height),
+            Constraint::Length(1),
+        ])
+        .areas(area);
 
-        // Two braille dots per cell horizontally.
-        let points = (body.width as usize).saturating_sub(Y_LABEL_WIDTH + 2).max(1) * 2;
+        let view = self.render_chart(frame, body);
+        self.render_header(frame, head);
+        self.render_overview(frame, strip, &view);
+        self.render_cards(frame, cards, &view);
+        self.render_keys(frame, keys);
+        if self.help {
+            render_help(frame, area);
+        }
+    }
+
+    /// Draw the trace and return what is on screen.
+    fn render_chart(&mut self, frame: &mut Frame, area: Rect) -> View {
+        // Inside the border: Y labels, the axis line, then two braille dots per cell.
+        let points = (area.width as usize).saturating_sub(2 + Y_LABEL_WIDTH + 1).max(1) * 2;
         let (start, width, n) = self.window(points);
         // With averaging, a point's window extends half the averaging length to each side of it.
         let reach = (self.average - 1) * width / 2;
@@ -253,6 +377,12 @@ impl Scope {
         let peak = data.iter().map(|d| d.1).fold(0.0, f64::max);
         let low = data.iter().map(|d| d.1).fold(f64::INFINITY, f64::min);
 
+        let (w_start, w_end) = (
+            start.max(self.trace.start_ms() as i64) as u64,
+            self.end().min(self.trace.end_ms()),
+        );
+        let mean = self.trace.pps(w_start, w_end).map(|pps| self.cal.na(pps));
+
         // Auto-range: grow at once, shrink only when the trace uses under a fifth of the scale.
         let wanted = full_scale_for(peak);
         if wanted > self.auto_full_scale || wanted < self.auto_full_scale / 5.0 {
@@ -263,20 +393,27 @@ impl Scope {
             YScale::Fixed(v) => v,
         };
 
-        let (y_bounds, y_labels, plotted): ([f64; 2], Vec<String>, Vec<(f64, f64)>) = if self.log {
-            let top = full_scale.log10().ceil().max(LOG_FLOOR_NA.log10() + 1.0);
+        let log_top = full_scale.log10().ceil().max(LOG_FLOOR_NA.log10() + 1.0);
+        let (y_bounds, y_labels): ([f64; 2], Vec<String>) = if self.log {
             let bottom = LOG_FLOOR_NA.log10();
-            let labels = (bottom as i32..=top as i32).map(|d| fmt_axis(10f64.powi(d))).collect();
-            let pts = data
-                .iter()
-                .map(|&(t, na)| (t, na.max(LOG_FLOOR_NA).log10().min(top)))
-                .collect();
-            ([bottom, top], labels, pts)
+            (
+                [bottom, log_top],
+                (bottom as i32..=log_top as i32)
+                    .map(|d| fmt_axis(10f64.powi(d)))
+                    .collect(),
+            )
         } else {
-            let labels = (0..=4).map(|i| fmt_axis(full_scale * i as f64 / 4.0)).collect();
-            let pts = data.iter().map(|&(t, na)| (t, na.min(full_scale))).collect();
-            ([0.0, full_scale], labels, pts)
+            (
+                [0.0, full_scale],
+                (0..=4).map(|i| fmt_axis(full_scale * i as f64 / 4.0)).collect(),
+            )
         };
+        // Position on the Y axis for a current in nA.
+        let y = |na: f64| match self.log {
+            true => na.max(LOG_FLOOR_NA).log10().min(log_top),
+            false => na.min(full_scale),
+        };
+        let plotted: Vec<(f64, f64)> = data.iter().map(|&(t, na)| (t, y(na))).collect();
 
         let (t0, t1) = (
             start as f64 / 1000.0,
@@ -286,101 +423,267 @@ impl Scope {
             .iter()
             .map(|t| fmt_time(*t, self.span_ms))
             .collect();
+        let mean_line: Vec<(f64, f64)> = mean.map(|m| vec![(t0, y(m)), (t1, y(m))]).unwrap_or_default();
 
-        let axis = Style::default().fg(Color::DarkGray);
-        let chart = Chart::new(vec![Dataset::default()
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Green))
-            .data(&plotted)])
-        .x_axis(Axis::default().style(axis).bounds([t0, t1]).labels(x_labels))
-        .y_axis(Axis::default().style(axis).bounds(y_bounds).labels(y_labels));
-        frame.render_widget(chart, body);
+        let mut scale = format!(" {} \u{b7} {} per point", fmt_span(self.span_ms), fmt_span(width));
+        if self.average > 1 {
+            scale += &format!(" \u{b7} avg {}", fmt_span(width * self.average));
+        }
+        let block = panel("Current").title_top(Line::from(scale + " ").right_aligned().style(dim()));
+        let chart = Chart::new(vec![
+            Dataset::default()
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(MEAN_COLOR).add_modifier(Modifier::DIM))
+                .data(&mean_line),
+            Dataset::default()
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(TRACE_COLOR))
+                .data(&plotted),
+        ])
+        .block(block)
+        .x_axis(Axis::default().style(dim()).bounds([t0, t1]).labels(x_labels))
+        .y_axis(Axis::default().style(dim()).bounds(y_bounds).labels(y_labels));
+        frame.render_widget(chart, area);
 
-        // Header.
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+        View {
+            start_ms: w_start,
+            end_ms: w_end,
+            width_ms: width,
+            mean,
+            low: if low.is_finite() { low } else { 0.0 },
+            peak,
+        }
+    }
+
+    fn render_header(&self, frame: &mut Frame, area: Rect) {
+        let bold = Style::new().add_modifier(Modifier::BOLD);
+        let badge = |text: &'static str, color| Span::styled(text, bold.fg(Color::Black).bg(color));
         let state = if !self.live {
-            Span::styled(" STOPPED ", bold.fg(Color::Black).bg(Color::Gray))
+            badge(" \u{25a0} STOPPED ", Color::Gray)
         } else if self.view_end.is_some() {
-            Span::styled(" PAUSED ", bold.fg(Color::Black).bg(Color::Yellow))
+            badge(" \u{25ae}\u{25ae} PAUSED ", Color::Yellow)
         } else {
-            Span::styled(" LIVE ", bold.fg(Color::Black).bg(Color::Green))
+            badge(" \u{25cf} LIVE ", Color::Green)
         };
         let mut header = vec![
-            Span::styled(" etrace ", bold),
+            Span::styled(" etrace ", bold.fg(Color::Black).bg(Color::Cyan)),
             state,
-            Span::raw(format!("  {}", self.source)),
+            Span::styled(format!("  {}", self.source), dim()),
         ];
+        let alert = bold.fg(Color::Red);
         if self.trace.overcurrent {
-            header.push(Span::styled("  OVERCURRENT", bold.fg(Color::Red)));
+            header.push(Span::styled("  OVERCURRENT", alert));
         }
         if self.decoder.counters.bad_bytes > 0 {
             header.push(Span::styled(
                 format!("  {} bad bytes", self.decoder.counters.bad_bytes),
-                Style::default().fg(Color::Red),
+                alert,
             ));
         }
         if let Some(m) = &self.message {
-            header.push(Span::styled(format!("  {m}"), Style::default().fg(Color::Red)));
+            header.push(Span::styled(format!("  {m}"), alert));
         }
-        frame.render_widget(Paragraph::new(Line::from(header)), head);
+        frame.render_widget(Paragraph::new(Line::from(header)), area);
+    }
 
-        // Footer: readouts, view settings, keys.
+    /// One row showing everything held, with the part on screen highlighted.
+    fn render_overview(&self, frame: &mut Frame, area: Rect, view: &View) {
+        const BARS: [&str; 8] = [
+            "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}",
+        ];
+        let (start, end) = (self.trace.start_ms(), self.trace.end_ms());
+        let cells = (area.width as usize).saturating_sub(4);
+        if end <= start || cells == 0 {
+            return;
+        }
+        let cell_ms = (end - start) as f64 / cells as f64;
+        let edge = |i: usize| start + (i as f64 * cell_ms) as u64;
+        let values: Vec<Option<f64>> = (0..cells)
+            .map(|i| {
+                self.trace
+                    .pps(edge(i), edge(i + 1).max(edge(i) + 1))
+                    .map(|pps| self.cal.na(pps))
+            })
+            .collect();
+        // Logarithmic height from 0.1 uA to at least 1 mA, so both sleep and wake-ups register.
+        let top = values.iter().flatten().fold(1e6, |a: f64, b| a.max(*b)).log10();
+        let bottom = LOG_FLOOR_NA.log10();
+        let mut spans = vec![Span::raw("  ")];
+        for (i, value) in values.iter().enumerate() {
+            let on_screen = edge(i + 1) > view.start_ms && edge(i) < view.end_ms;
+            let style = if on_screen { Style::new().fg(TRACE_COLOR) } else { dim() };
+            let bar = match value {
+                Some(na) => {
+                    let level = (na.max(LOG_FLOOR_NA).log10() - bottom) / (top - bottom);
+                    BARS[((level * 7.0).round() as usize).min(7)]
+                }
+                None => " ",
+            };
+            spans.push(Span::styled(bar, style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn render_cards(&self, frame: &mut Frame, area: Rect, view: &View) {
         let newest = self.trace.end_ms();
-        let (w_start, w_end) = ((start.max(self.trace.start_ms() as i64)) as u64, self.end().min(newest));
-        let window_mean = self.trace.pps(w_start, w_end).map(|pps| self.cal.na(pps));
-        let mut readout = String::new();
-        if self.live {
-            if let Some(pps) = self.trace.pps(newest.saturating_sub(1000), newest) {
-                readout += &format!("now {} (1 s)   ", fmt_current(self.cal.na(pps)));
+        let now = self
+            .live
+            .then(|| self.trace.pps(newest.saturating_sub(1000), newest))
+            .flatten()
+            .map(|pps| self.cal.na(pps));
+        let from = self.totals_from_ms.max(self.trace.start_ms());
+        let total_s = newest.saturating_sub(from) as f64 / 1000.0;
+        let total = self.trace.pps(from, newest).map(|pps| self.cal.na(pps));
+        let window_s = view.end_ms.saturating_sub(view.start_ms) as f64 / 1000.0;
+        let energy = |mean_na: f64, seconds: f64| fmt_energy(mean_na * seconds / 1000.0 * SUPPLY_V);
+
+        if area.height < 5 {
+            // Compact form: one line.
+            let mut text = String::from(" ");
+            if let Some(na) = now {
+                text += &format!("now {}   ", fmt_current(na));
             }
+            if let Some(mean) = view.mean {
+                text += &format!(
+                    "window: mean {}  min {}  max {}   ",
+                    fmt_current(mean),
+                    fmt_current(view.low),
+                    fmt_current(view.peak)
+                );
+            }
+            if let Some(mean) = total {
+                text += &format!("total: mean {}  {}", fmt_current(mean), energy(mean, total_s));
+            }
+            frame.render_widget(Paragraph::new(text), area);
+            return;
         }
-        if let Some(mean) = window_mean {
-            let seconds = (w_end - w_start) as f64 / 1000.0;
-            readout += &format!(
-                "window: mean {}  min {}  max {}  {}   ",
-                fmt_current(mean),
-                fmt_current(if low.is_finite() { low } else { 0.0 }),
-                fmt_current(peak),
-                fmt_energy(mean * seconds / 1000.0 * SUPPLY_V),
-            );
+
+        let value =
+            |text: String, color: Color| Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD));
+        let label = |text: &'static str| Span::styled(text, dim());
+        let label_owned = |text: String| Span::styled(text, dim());
+        let now_width = if self.live { 18 } else { 0 };
+        let [now_area, window_area, total_area, view_area, cal_area] = Layout::horizontal([
+            Constraint::Length(now_width),
+            Constraint::Length(28),
+            Constraint::Length(22),
+            Constraint::Length(24),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+
+        if let Some(na) = now {
+            let lines = vec![
+                Line::from(value(fmt_current(na), TRACE_COLOR)),
+                Line::from(label("last 1 s")),
+            ];
+            let block = panel("Now");
+            let inner = block.inner(now_area);
+            frame.render_widget(Paragraph::new(lines).block(block), now_area);
+            // Level meter on a logarithmic scale from 0.1 uA to 100 mA.
+            let ratio = ((na.max(LOG_FLOOR_NA).log10() - 2.0) / 6.0).clamp(0.0, 1.0);
+            let filled = (ratio * inner.width as f64).round() as usize;
+            let meter = Line::from(vec![
+                Span::styled("\u{2501}".repeat(filled), Style::new().fg(TRACE_COLOR)),
+                Span::styled("\u{2500}".repeat((inner.width as usize).saturating_sub(filled)), dim()),
+            ]);
+            let row = Rect {
+                y: inner.y + 2,
+                height: inner.height.saturating_sub(2).min(1),
+                ..inner
+            };
+            frame.render_widget(Paragraph::new(meter), row);
+        } else if self.live {
+            frame.render_widget(panel("Now"), now_area);
         }
-        if let Some(pps) = self.trace.pps(self.totals_from_ms.max(self.trace.start_ms()), newest) {
-            let seconds = (newest - self.totals_from_ms.max(self.trace.start_ms())) as f64 / 1000.0;
-            let mean = self.cal.na(pps);
-            readout += &format!(
-                "total: {}  mean {}  {}",
-                fmt_time(seconds, 0),
-                fmt_current(mean),
-                fmt_energy(mean * seconds / 1000.0 * SUPPLY_V)
-            );
-        }
-        let averaged_ms = width * self.average;
-        let settings = format!(
-            "span {}  {} per point{}  one pulse = {}   Y {} {}",
-            fmt_span(self.span_ms),
-            fmt_span(width),
-            if self.average > 1 {
-                format!(", averaged over {}", fmt_span(averaged_ms))
-            } else {
-                String::new()
-            },
-            fmt_current(self.cal.step_na(averaged_ms as f64 / 1000.0)),
-            if self.y == YScale::Auto { "auto" } else { "fixed" },
-            if self.log { "log" } else { "linear" },
-        );
-        let keys = format!(
-            "{}+/- span  \u{2190}/\u{2192} pan  \u{2191}/\u{2193} Y zoom  a auto Y  g log  s smooth  f fit  r reset totals  q quit",
-            if self.live { "space pause  " } else { "" }
-        );
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(format!(" {readout}")),
-                Line::from(format!(" {settings}")),
-                Line::from(Span::styled(format!(" {keys}"), axis)),
+
+        let window = match view.mean {
+            Some(mean) => vec![
+                Line::from(vec![label("mean "), value(fmt_current(mean), MEAN_COLOR)]),
+                Line::from(vec![
+                    label("min "),
+                    Span::raw(fmt_current(view.low)),
+                    label("  max "),
+                    Span::raw(fmt_current(view.peak)),
+                ]),
+                Line::from(vec![
+                    Span::raw(energy(mean, window_s)),
+                    label(" in "),
+                    Span::raw(fmt_time(window_s, 0)),
+                ]),
+            ],
+            None => vec![Line::from(label("no data in view"))],
+        };
+        frame.render_widget(Paragraph::new(window).block(panel("Window")), window_area);
+
+        let totals = match total {
+            Some(mean) => vec![
+                Line::from(vec![label("mean "), value(fmt_current(mean), Color::Reset)]),
+                Line::from(vec![label("time "), Span::raw(fmt_time(total_s, 0))]),
+                Line::from(vec![label("energy "), Span::raw(energy(mean, total_s))]),
+            ],
+            None => vec![Line::from(label("waiting for data"))],
+        };
+        let title = if self.live { "Total" } else { "Capture" };
+        frame.render_widget(Paragraph::new(totals).block(panel(title)), total_area);
+
+        let averaged_ms = view.width_ms * self.average;
+        let settings = vec![
+            Line::from(vec![label("span "), Span::raw(fmt_span(self.span_ms))]),
+            Line::from(vec![
+                label("1 pulse = "),
+                Span::raw(fmt_current(self.cal.step_na(averaged_ms as f64 / 1000.0))),
             ]),
-            foot,
-        );
+            Line::from(vec![
+                label("Y "),
+                Span::raw(if self.y == YScale::Auto { "auto" } else { "fixed" }),
+                label(" \u{b7} "),
+                Span::raw(if self.log { "log" } else { "linear" }),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(settings).block(panel("View")), view_area);
+
+        // "pps" = pulses per second; the help screen spells it out.
+        let calibration = vec![
+            Line::from(vec![
+                label("scale "),
+                Span::raw(format!("{:.1} nA/pps", self.cal.na_per_pps)),
+            ]),
+            Line::from(vec![label("offset "), Span::raw(format!("{:.1} pps", self.cal.x0_pps))]),
+            Line::from(label_owned(self.cal_note.clone())),
+        ];
+        if cal_area.width >= 12 {
+            frame.render_widget(Paragraph::new(calibration).block(panel("Calibration")), cal_area);
+        }
+    }
+
+    fn render_keys(&self, frame: &mut Frame, area: Rect) {
+        let mut keys: Vec<(&str, &str)> = Vec::new();
+        if self.live {
+            keys.push(("space", "pause"));
+        }
+        keys.extend([
+            ("+/-", "span"),
+            ("\u{2190}/\u{2192}", "pan"),
+            ("\u{2191}/\u{2193}", "Y zoom"),
+            ("a", "auto Y"),
+            ("g", "log"),
+            ("s", "smooth"),
+            ("f", "fit"),
+            ("?", "help"),
+            ("q", "quit"),
+        ]);
+        let mut spans = vec![Span::raw(" ")];
+        for (key, what) in keys {
+            spans.push(Span::styled(
+                key,
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(format!(" {what}   "), dim()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     /// Run interactively until the user quits. `feed` supplies live data, if any.
@@ -480,10 +783,11 @@ fn fmt_time(seconds: f64, span_ms: u64) -> String {
 }
 
 fn fmt_span(ms: u64) -> String {
+    let trim = |v: f64| format!("{v:.1}").trim_end_matches(".0").to_string();
     match ms {
         0..=999 => format!("{ms} ms"),
-        1_000..=119_999 => format!("{} s", ms as f64 / 1000.0),
-        _ => format!("{} min", ms as f64 / 60_000.0),
+        1_000..=119_999 => format!("{} s", trim(ms as f64 / 1000.0)),
+        _ => format!("{} min", trim(ms as f64 / 60_000.0)),
     }
 }
 
@@ -549,7 +853,8 @@ mod tests {
         let text = s.dump(100, 20);
         assert!(text.contains("STOPPED"), "{text}");
         assert!(text.contains("mean 499 µA"), "{text}"); // the first 10 records are dropped
-        assert!(text.contains("span 4.999 s"), "{text}");
+        assert!(text.contains("span 5 s"), "{text}");
+        assert!(text.contains("Capture"), "{text}");
         // The trace is drawn in braille somewhere in the chart area.
         assert!(
             text.chars()
@@ -593,7 +898,24 @@ mod tests {
         let smooth = s.dump(100, 20);
         // 20 pulses/s * 500 nA = 10 uA, give or take one pulse in the averaging window.
         assert!(!smooth.contains("min 0.00 µA"), "{smooth}");
-        assert!(smooth.contains("averaged over"), "{smooth}");
+        assert!(smooth.contains("avg 768 ms"), "{smooth}");
+    }
+
+    #[test]
+    fn help_opens_and_any_key_closes_it() {
+        let mut s = scope(5_000, 10);
+        s.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(s.dump(100, 30).contains("any key closes"));
+        // The key that closes the help does nothing else.
+        assert!(s.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!s.dump(100, 30).contains("any key closes"));
+    }
+
+    #[test]
+    fn short_terminal_gets_a_compact_readout() {
+        let text = scope(5_000, 10).dump(100, 12);
+        assert!(text.contains("window: mean 499 µA"), "{text}");
+        assert!(!text.contains("Capture"), "{text}");
     }
 
     #[test]

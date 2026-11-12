@@ -5,24 +5,35 @@ Code Composer Studio. Watch the current live as a terminal oscilloscope, or
 record it headless and get statistics.
 
 ```
- etrace  LIVE   XDS110  10000 ticks/s  488.9 nA per pulse/s, offset 15.7 pulses/s
-5 mA   │
-       │                                  ⢀⠤⡄                                         ⢠⢤
-3.75 mA│                                  ⡇ ⡇                                         ⢸⢸
-       │                                  ⡇ ⡇                                         ⡇ ⡇
-2.5 mA │                                  ⡇ ⢸                                         ⡇ ⡇
-       │                                 ⢸  ⢸                                         ⡇ ⡇
-1.25 mA│                                 ⢸  ⢸                                        ⢸  ⢱
-       │                                 ⢸  ⠘⡄                                       ⢸  ⢸
-0      │⡠⡠⡠⡠⣀⢄⢄⢄⢄⢄⢄⢄⢄⢄⠤⡠⡠⡠⡠⡠⡠⡠⡠⡠⣀⢄⢄⢄⢄⢄⢄⢄⢄⢼   ⡧⡠⡠⡠⡠⡠⡠⣀⢄⢄⢄⢄⢄⢄⢄⢄⢄⠤⡠⡠⡠⡠⡠⡠⡠⡠⡠⣀⢄⢄⢄⢄⡠⡠⡠⡠⡠⣀⠤⡠⡸  ⠸⣀⢄⢄⠤⡠⡠⡠⡠⡠⡠⡠⡠⡠⣀⢄⢄⢄
-       └──────────────────────────────────────────────────────────────────────────────────────────────
-   0.8 s                                           3.3 s                                        5.8 s
- now 2.1 µA (1 s)   window: mean 168 µA  min 0.00 µA  max 4.128 mA  2.77 mJ   total: 5.8 s  mean 216 µA
- span 5 s  24 ms per point  one pulse = 20.4 µA   Y auto linear
- space pause  +/- span  ←/→ pan  ↑/↓ Y zoom  a auto Y  g log  s smooth  f fit  r reset totals  q quit
+ etrace  ■ STOPPED   tools/energytrace/captures/lp_blinky_gpiofix.bin
+╭ Current ────────────────────────────────────────────────────────────────────── 8 s · 44 ms per point ╮
+│5 mA   │                                                                                              │
+│       │            ⣀                      ⢀                       ⣀                      ⢀           │
+│       │            ⣿                      ⢸                       ⣿                      ⢸           │
+│3.75 mA│            ⣿                      ⡸⡀                      ⣿                      ⣿           │
+│       │            ⣿                      ⡇⡇                      ⣿                      ⡟⡄          │
+│       │            ⣿                      ⡇⡇                     ⢀⢿                      ⡇⡇          │
+│2.5 mA │           ⢠⠃⡇                     ⡇⡇                     ⢸⠘⡄                     ⡇⡇          │
+│       │           ⢸ ⡇                     ⡇⡇                     ⢸ ⡇                     ⡇⡇          │
+│       │           ⢸ ⡇                    ⢠⠃⢇                     ⢸ ⡇                    ⢸ ⡇          │
+│1.25 mA│           ⢸ ⡇                    ⢸ ⢸                     ⢸ ⡇                    ⢸ ⢱          │
+│       │           ⢸ ⢇                    ⢸ ⢸                     ⡸ ⡇                    ⢸ ⢸          │
+│0      │⠤⢄⠤⠤⠤⠤⠤⠤⡠⠤⠤⠎⠒⠸⠤⠤⠤⠤⠤⡠⠤⠤⠤⠤⠤⡠⠤⠤⠤⠤⠤⡠⠤⠤⠼⠒⠸⢄⠤⠤⠤⠤⠤⠤⡠⠤⠤⠤⠤⢄⠤⠤⠤⠤⠤⠤⡠⠤⠇⠒⠣⠤⡠⠤⠤⠤⠤⠤⡠⠤⠤⠤⠤⠤⡠⠤⠤⠤⠤⠤⡠⠼⠒⠸⠤⠤⠤⠤⡠⠤⠤⠤⠤⡀│
+│       └──────────────────────────────────────────────────────────────────────────────────────────────│
+│   5.0 s                                            9.0 s                                       13.0 s│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  █▃▃▃▃▃▃▄▃▃█▃▄▃▃▃▃▃▄▃█▃▃▃▄▃▃▃▃▃█▄▃▃▃▃▃▄▃▃█▃▄▃▃▃▃▃▃▄█▃▃▃▃▃▄▃▃▃█▃▃▃▃▃▃▄▃▃█▃▃▃▃▄▃▃▃▃█▃▃▃▃▃▄▃▃▃█▃▄▃▃▃▃▃▃▃
+╭ Window ──────────────────╮╭ Capture ───────────╮╭ View ────────────────╮╭ Calibration ───────────────╮
+│mean 212 µA               ││mean 217 µA         ││span 8 s              ││scale 493.5 nA/pps          │
+│min 0.00 µA  max 4.187 mA ││time 20.0 s         ││1 pulse = 11.2 µA     ││offset 16.2 pps             │
+│5.58 mJ in 8.0 s          ││energy 14.31 mJ     ││Y auto · linear       ││nominal (none saved)        │
+╰──────────────────────────╯╰────────────────────╯╰──────────────────────╯╰────────────────────────────╯
+ +/- span   ←/→ pan   ↑/↓ Y zoom   a auto Y   g log   s smooth   f fit   ? help   q quit
 ```
 
-(An MSPM0L1306 asleep at 2 µA, waking to flash an LED every 2 s.)
+(`etrace view` on a capture of an MSPM0L1306 asleep at 2 µA, waking to flash an LED every 2 s.
+In a terminal the trace is green, the window mean a yellow line, and the part of the overview strip
+that is on screen is highlighted.)
 
 ## What you need
 
@@ -83,11 +94,15 @@ target wakes up now and then.
 | `s` | smoothing: average each point over 4, 16 or 64 points |
 | `f` | fit the whole trace |
 | `r` | restart the totals |
+| `?` | key reference |
 | `q` | quit |
 
-The footer shows the mean over the last second, the mean, extremes and energy
-of the window on screen, and the totals since the start or the last `r`. To
-measure one event, pause, then zoom and pan until the window brackets it.
+Under the trace, a one-row strip shows everything recorded so far, on a
+logarithmic scale, with the part on screen highlighted. The cards below it
+show the mean over the last second (live only), the mean, extremes and energy
+of the window on screen, the totals since the start or the last `r`, the view
+settings, and the calibration in use. To measure one event, pause, then zoom
+and pan until the window brackets it.
 
 ## Reading the numbers
 

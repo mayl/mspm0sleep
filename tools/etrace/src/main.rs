@@ -202,8 +202,8 @@ fn load(path: &Path, cal: &CalArgs) -> Result<Capture> {
     let meta = Meta::load(path);
     let (cal, cal_source) = match (cal.cal, &meta) {
         (Some(c), _) => (c, "from --cal"),
-        (None, Some(m)) => (m.calibration, "from the capture"),
-        (None, None) => (Calibration::NOMINAL, "nominal: no calibration saved with this capture"),
+        (None, Some(m)) => (m.calibration, "saved with the capture"),
+        (None, None) => (Calibration::NOMINAL, "nominal (none saved)"),
     };
     let (trace, decoder) = Trace::from_raw(&raw, meta.map_or(10_000, |m| m.sample_rate));
     Ok(Capture {
@@ -348,8 +348,12 @@ fn live(args: LiveArgs) -> Result<()> {
 
     let (mut scope, worker) = if let Some(path) = &args.replay {
         let capture = load(path, &args.cal)?;
-        let source = format!("replay of {} ({})", path.display(), describe_cal(&capture.cal));
-        let scope = Scope::live(capture.trace.rate(), capture.cal, source);
+        let mut scope = Scope::live(
+            capture.trace.rate(),
+            capture.cal,
+            format!("replay of {}", path.display()),
+        );
+        scope.set_cal_note(capture.cal_source);
         let (speed, flag) = (args.speed, stop.clone());
         (scope, std::thread::spawn(move || replay(capture.raw, speed, tx, flag)))
     } else {
@@ -362,11 +366,19 @@ fn live(args: LiveArgs) -> Result<()> {
             None => None,
         };
         let cal = args.cal.cal.unwrap_or(session.cal);
-        let mut source = format!("XDS110  {} ticks/s  {}", session.rate, describe_cal(&cal));
+        let mut source = match session.rate % 1000 {
+            0 => format!("XDS110 \u{b7} {} kHz", session.rate / 1000),
+            _ => format!("XDS110 \u{b7} {} Hz", session.rate),
+        };
         if let Some(path) = &args.save {
-            source = format!("recording to {}  {source}", path.display());
+            source += &format!(" \u{b7} recording to {}", path.display());
         }
-        let scope = Scope::live(session.rate, cal, source);
+        let mut scope = Scope::live(session.rate, cal, source);
+        scope.set_cal_note(if args.cal.cal.is_some() {
+            "from --cal"
+        } else {
+            "measured at start"
+        });
         let flag = stop.clone();
         let worker = std::thread::spawn(move || {
             let result = pump(&mut session, &flag, |bytes| {
@@ -399,14 +411,9 @@ fn live(args: LiveArgs) -> Result<()> {
 
 fn view(args: ViewArgs) -> Result<()> {
     let capture = load(&args.file, &args.cal)?;
-    let source = format!(
-        "{}  {} ({})",
-        args.file.display(),
-        describe_cal(&capture.cal),
-        capture.cal_source
-    );
     let rate = capture.trace.rate();
-    let mut scope = Scope::file(&capture.raw, rate, capture.cal, source);
+    let mut scope = Scope::file(&capture.raw, rate, capture.cal, args.file.display().to_string());
+    scope.set_cal_note(capture.cal_source);
     args.display.apply(&mut scope);
     if let Some(at) = args.at {
         scope.set_end(at);
