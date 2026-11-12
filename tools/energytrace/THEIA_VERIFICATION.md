@@ -330,3 +330,24 @@ Implemented in repro-cli from the corrections list: 1 (two-point conversion), 2 
 and the parts of 5 that affect totals (u16 pulse count, config record, 10-record discard, no URB #1
 skip). Not done: full header bit-field dispatch with `0x80` / `0xa0` records and bad-data
 counting, tick-count from heartbeats, 6, 7, 8.
+
+## Hardware follow-up (2026-11-12, while writing `tools/etrace`)
+
+`tools/etrace` implements the rest of the corrections list: header bit-field dispatch with
+`0x74`, `0x80`, `0xa0` and the ET+ record lengths, bad-data counting, time from heartbeats,
+tick-based means, response validation, the 500 ms drain after `ET_Stop`, and `ET_Cleanup`.
+Not implemented: TI's adaptive averaging window and 100 nA rounding (item 7).
+
+| Question | Result on hardware (hardware 0x28, firmware 3.0.0.34) |
+|---|---|
+| Response framing | Every response satisfies `length field + 3 == bytes received`, as `XDS_Execute_NoLog` checks. |
+| `ET_Cleanup` (0x21) | Accepted (status 0) after `ET_Stop` and the drain. A new session opens normally afterwards. |
+| Do stream ticks follow the configured rate? | Yes. At 1, 2, 10, 20 and 50 kHz a capture of N seconds by the stream's own ticks takes N seconds of wall time, and the heartbeat count scales with the rate. The config record carries the rate. |
+| Do calibration ticks follow the configured rate? | **No.** `ET_Calibrate` returned 3141 pulses / 10186 ticks (load) and 16 / 10186 (open) at 2 kHz exactly as at 10 kHz. So the calibration tick count must be read on a fixed 10 kHz base, not `samplingFreq` as in the pseudo-code in section 2. Done that way, a blinking target reads 207 to 222 uA mean at every rate from 1 to 50 kHz; using the configured rate instead gave 1.08 mA at 2 kHz and 101 uA at 20 kHz. |
+| How long does `ET_Calibrate` take? | 502 ms per call, although it reports 10186 ticks. Not understood: at 100 us per tick that would be 1.02 s. The scale that results from treating them as 100 us ticks is independently confirmed by the 165 uA thermistor divider (reads 164.7 uA), so the reading is used as is. |
+| Physical pulse rate vs sample rate | Unchanged: the sleeping target shows 20 pulses/s at every rate. |
+| USB packets | The probe sends a short packet about every 100 ms (199 reads in a 20 s capture), so a live display lags by about that much. |
+
+If TI's library really divides the calibration ticks by a `samplingFreq` other than 10000, its
+currents would be off by that ratio at other rates; whether it ever runs this probe at another
+rate was not determined.

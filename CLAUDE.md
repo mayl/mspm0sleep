@@ -64,8 +64,13 @@ nix develop .# --command bash -c 'cd firmware && cargo build --release --no-defa
 nix develop .# --command tools/button_test.sh build
 nix develop .# --command python3 tools/edge_matrix.py 20      # pulses PA9 from the XDS110 UART
 
-# flash + release debug holds + EnergyTrace capture + floor summary
+# flash + release debug holds + EnergyTrace capture + statistics
 nix develop .# --command tools/measure.sh lp_idle my_capture 20
+
+# EnergyTrace utility: build + test, live scope, look at a capture without a terminal
+nix develop .# --command bash -c 'cd tools/etrace && cargo build --release && cargo test --release'
+nix run .#etrace -- live                      # interactive; needs a real terminal
+tools/etrace/target/release/etrace view tools/energytrace/captures/lp_blinky_gpiofix.bin --dump 120x30
 ```
 
 Do NOT flash with a bare `probe-rs run/download` when the target is asleep: probe-rs 0.32 cannot attach to an MSPM0 in STOP/STANDBY. Use `tools/unwedge/unwedge.py wake` first and `release` afterwards (see `docs/UNWEDGE.md`).
@@ -74,7 +79,8 @@ Do NOT flash with a bare `probe-rs run/download` when the target is asleep: prob
 
 - `embassy/` — submodule, **unmodified upstream** embassy (branch `mspm0l_lowpower` on the fork tracks `embassy-rs/embassy` main). Upstream provides MSPM0 deep sleep via `embassy_mspm0::executor::Executor` + the `low-power` feature; our own earlier sleep work was dropped in favour of it.
 - `firmware/` — measurement firmwares for LP-MSPM0L1306 (`lp_idle`, `lp_blinky`, `busy`).
-- `tools/energytrace/repro-cli` — standalone XDS110 EnergyTrace capture (Rust, libusb).
+- `tools/etrace` — the EnergyTrace utility (Rust lib + CLI): live terminal scope, headless capture, statistics, export. `tools/measure.sh` uses it. See its README.
+- `tools/energytrace/` — captures, reverse-engineering notes, and `repro-cli`, the scratch tool the protocol was worked out with (EEPROM dump, legacy flows). New work goes in `tools/etrace`.
 - `tools/unwedge/` — raw CMSIS-DAP access to MSPM0's PWR-AP: wake a sleeping chip for the debugger, and release it again.
 
 ### Key Documents
@@ -85,6 +91,7 @@ Do NOT flash with a bare `probe-rs run/download` when the target is asleep: prob
 | `docs/LOWPOWER_RESULTS.md` | Upstream embassy low-power verification + EnergyTrace measurements |
 | `docs/UPSTREAM_GPIO_WAKE_PR.md` | Draft upstream fix for GPIO wake (fork branch `mspm0-gpio-wake`): design notes, test evidence, what must be hand-written before a PR |
 | `docs/CCS_MSPM0_LOWPOWER.md` | What TI CCS Theia does on connect/disconnect, DSSM mailbox commands (from GEL + disassembly) |
+| `tools/etrace/README.md` | Using etrace, what its numbers mean (resolution, offset, what is on the rail) |
 | `tools/energytrace/REVERSE_ENGINEERING.md` | XDS110 EnergyTrace USB protocol notes (historical; later sections supersede earlier ones) |
 | `tools/energytrace/THEIA_VERIFICATION.md` | Those notes checked claim-by-claim against TI's libraries |
 

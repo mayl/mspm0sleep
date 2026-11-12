@@ -35,7 +35,21 @@
           # TI CCS Theia: reverse-engineering reference for the XDS110 /
           # EnergyTrace libraries only. Multi-GB, x86_64 only, and deliberately
           # NOT in the dev shell: `nix build .#ccs-theia`.
-          packages = lib.optionalAttrs (system == "x86_64-linux") {
+          packages = {
+            # EnergyTrace current measurement with the LaunchPad's XDS110:
+            # `nix run .#etrace -- live`. Built on demand, not part of the shell.
+            etrace = pkgs.rustPlatform.buildRustPackage {
+              pname = "etrace";
+              version = "0.1.0";
+              src = ./tools/etrace;
+              cargoLock.lockFile = ./tools/etrace/Cargo.lock;
+              nativeBuildInputs = [ pkgs.pkg-config ];
+              buildInputs = [ pkgs.libusb1 ];
+              # The integration tests read captures that live outside this source tree.
+              doCheck = false;
+              meta.mainProgram = "etrace";
+            };
+          } // lib.optionalAttrs (system == "x86_64-linux") {
             ccs-theia = (import inputs.nixpkgs {
               inherit system;
               config.allowUnfreePredicate = pkg:
@@ -48,13 +62,13 @@
 
             packages = [ rustToolchain ] ++ (with pkgs; [
               probe-rs-tools
-              libusb1 # repro-cli talks to the XDS110 directly
+              libusb1 # etrace talks to the XDS110 directly
               pkg-config
               uhubctl # power-cycle the LaunchPad's hub port
               radare2 # disassembly of TI's XDS110/EnergyTrace libs
             ]);
 
-            # repro-cli links libusb-1.0 dynamically with no rpath.
+            # etrace built with cargo links libusb-1.0 dynamically with no rpath.
             LD_LIBRARY_PATH = "${pkgs.libusb1}/lib";
           };
         };
