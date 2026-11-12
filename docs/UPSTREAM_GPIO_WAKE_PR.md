@@ -135,8 +135,9 @@ cost of fast wake is below that.
 (1.12.0-nightly, 2026-11-09) with the repo's `rustfmt.toml` reports no changes
 for `gpio.rs`.
 
-The board is left running `lp_blinky` built against the fix, so pressing S2
-should flash the LED at once and toggle the blink rate on every press.
+**By hand** (2026-11-12): with `lp_blinky` built against the fix, Larry
+confirmed that pressing S2 (PA14, a real button with bounce) works in the
+default idle mode. Presses were not counted.
 
 ## What only you can do before opening a PR
 
