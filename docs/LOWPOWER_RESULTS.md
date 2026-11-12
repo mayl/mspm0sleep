@@ -254,6 +254,21 @@ Not tested: pins other than PA9/PA14, the power cost of FASTWAKE beyond "no
 change at 0.5 uA resolution", pulses longer than 60 ms, and the deaf state in
 a timer-based application with no timer due.
 
+### Upstream status (checked 2026-11-12)
+
+Reported as [embassy-rs/embassy#7513](https://github.com/embassy-rs/embassy/issues/7513).
+
+- `embassy-mspm0` on upstream `main` (5e697db33) is identical to the commit
+  tested here (5b8b806ce); no existing issue or PR covered this.
+- The closed PR #6580 had a GPIO part (`EdgeArm`: sets `FASTWAKE`, always
+  programs both edges and decides direction by sampling `DIN` in the interrupt
+  handler). It was left out when the work was split into #6646, but the doc
+  comment in `low_power/mod.rs` saying the STANDBY1 half of `GPIO_ERR_01` "is
+  handled" was kept.
+- Open PR #7326 (GPIO interrupt bindings) rewrites `gpio.rs` without adding
+  `FASTWAKE` or changing the `wait_for_high` / `wait_for_low` order; a fix
+  would have to be coordinated with it.
+
 ### Measurement corrections made along the way
 
 - `cortex_m::asm::delay(n)` takes 3 CPU cycles per count on this core
