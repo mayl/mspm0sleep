@@ -268,6 +268,9 @@ Reported as [embassy-rs/embassy#7513](https://github.com/embassy-rs/embassy/issu
 - Open PR #7326 (GPIO interrupt bindings) rewrites `gpio.rs` without adding
   `FASTWAKE` or changing the `wait_for_high` / `wait_for_low` order; a fix
   would have to be coordinated with it.
+- A draft fix exists on the fork branch `mspm0-gpio-wake` (not submitted):
+  with it, every cell of the matrix above reads 20/20 in every idle mode
+  without the firmware touching `FASTWAKE`. See `docs/UPSTREAM_GPIO_WAKE_PR.md`.
 
 ### Measurement corrections made along the way
 

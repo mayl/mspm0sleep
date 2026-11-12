@@ -8,6 +8,9 @@ reset and is read exactly once, after the pulses, so the readout (which
 briefly forces the chip active) cannot influence the result.
 
 usage: edge_matrix.py [N=20]      (edge_test must already be flashed)
+env:   OUT=edge_matrix.json    result file name under tools/energytrace/captures/
+       CAPS=4,3,2,1,0          idle modes to run (bits 11:8 of BTN_CFG)
+       FWS=0,1                 firmware-set FASTWAKE settings to run
 """
 import json, os, sys, time
 
@@ -20,6 +23,8 @@ from edge_matrix_common import with_dap
 ELF = os.path.join(ROOT, "firmware/target-notimer/thumbv6m-none-eabi/release/edge_test")
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 CAPS = [(4, "WFI (control)"), (3, "STOP0"), (2, "STOP2"), (1, "STANDBY0"), (0, "STANDBY1 (default)")]
+CAPS = [c for c in CAPS if str(c[0]) in os.environ.get("CAPS", "4,3,2,1,0").split(",")]
+FWS = [int(x) for x in os.environ.get("FWS", "0,1").split(",")]
 # (label, baud, byte, resleep): 0xFF -> low for 1 bit time; 0x00 -> low for 9 bit times
 SHAPES = [("8.7 us", 115200, 0xFF, 0), ("833 us", 1200, 0xFF, 0), ("30 ms", 300, 0x00, 0),
           ("30 ms, re-sleep while low", 300, 0x00, 2)]
@@ -43,7 +48,7 @@ def run_cell(word, baud, byte):
 
 rows, results = [], []
 for cap, capname in CAPS:
-    for fw in (0, 1):
+    for fw in FWS:
         cells = []
         for label, baud, byte, resleep in SHAPES:
             word = (cap << 8) | fw | resleep
@@ -60,4 +65,5 @@ for cap, capname in CAPS:
 print("\n| Idle mode | FASTWAKE | " + " | ".join(s[0] for s in SHAPES) + " |")
 print("|---|---|" + "---|" * len(SHAPES))
 print("\n".join(rows))
-json.dump(results, open(os.path.join(ROOT, "tools/energytrace/captures/edge_matrix.json"), "w"), indent=1)
+json.dump(results, open(os.path.join(ROOT, "tools/energytrace/captures", os.environ.get("OUT", "edge_matrix.json")), "w"),
+          indent=1)

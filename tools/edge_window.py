@@ -7,6 +7,9 @@ points in the firmware's handling. A strategy with a window between reading
 the pin and arming the interrupt should lose pulses at some width.
 
 usage: edge_window.py [N=50]
+env:   STRATS=2,4,3   strategies to run (bits 15:12 of BTN_CFG; 0 = plain wait_for_falling_edge)
+       FW=1           1: the firmware sets FASTWAKE itself; 0: leave it to the HAL
+       WIDTHS=a:b:s   pulse widths in us, a to b inclusive in steps of s (default: 64 widths, 9 to 833)
 """
 import os, sys, time
 
@@ -18,8 +21,14 @@ from edge_matrix_common import with_dap
 
 ELF = os.path.join(ROOT, "firmware/target-notimer/thumbv6m-none-eabi/release/edge_test")
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 50
-NAMES = {2: "check pin, then arm rising (wait_for_high)", 3: "arm both edges", 4: "arm, then check pin"}
+NAMES = {0: "plain wait_for_falling_edge", 2: "check pin, then arm rising (wait_for_high)",
+         3: "arm both edges", 4: "arm, then check pin"}
+STRATS = [int(x) for x in os.environ.get("STRATS", "2,4,3").split(",")]
+FW = int(os.environ.get("FW", "1"))
 WIDTHS_US = [9, 12, 15, 18] + list(range(20, 81, 2)) + list(range(85, 201, 5)) + [250, 300, 400, 500, 833]
+if "WIDTHS" in os.environ:
+    a, b, step = (int(x) for x in os.environ["WIDTHS"].split(":"))
+    WIDTHS_US = list(range(a, b + 1, step))
 
 
 def boot(word):
@@ -32,8 +41,8 @@ def boot(word):
             return r
 
 
-for strat in (2, 4, 3):
-    word = 0x003 | (strat << 12)
+for strat in STRATS:
+    word = 0x002 | FW | (strat << 12)
     boot(word)
     time.sleep(1.5)
     prev = with_dap(unwedge.peek, ELF, True)

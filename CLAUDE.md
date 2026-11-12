@@ -83,6 +83,7 @@ Do NOT flash with a bare `probe-rs run/download` when the target is asleep: prob
 |------|---------|
 | `docs/UNWEDGE.md` | Why SWD "dies" on a sleeping/blank MSPM0, PWR-AP bits, recovery recipe, uhubctl caveat |
 | `docs/LOWPOWER_RESULTS.md` | Upstream embassy low-power verification + EnergyTrace measurements |
+| `docs/UPSTREAM_GPIO_WAKE_PR.md` | Draft upstream fix for GPIO wake (fork branch `mspm0-gpio-wake`): design notes, test evidence, what must be hand-written before a PR |
 | `docs/CCS_MSPM0_LOWPOWER.md` | What TI CCS Theia does on connect/disconnect, DSSM mailbox commands (from GEL + disassembly) |
 | `tools/energytrace/REVERSE_ENGINEERING.md` | XDS110 EnergyTrace USB protocol notes (historical; later sections supersede earlier ones) |
 | `tools/energytrace/THEIA_VERIFICATION.md` | Those notes checked claim-by-claim against TI's libraries |
@@ -98,3 +99,4 @@ The `embassy/` directory is a git submodule pointing to the Embassy fork for thi
 - **No Co-Authored-By lines** in commits within the `embassy/` submodule. Use your standard git config.
 - **Work on feature branches** (currently `mspm0l_lowpower`, which is plain upstream) — do not commit directly to `main`. Prefer keeping the submodule unmodified and putting our code in `firmware/`.
 - Commit submodule changes **first** inside `embassy/`, then update the parent repo pointer.
+- **Nothing AI-written goes to embassy-rs as prose.** Their proposed AI policy (PR #6618) allows AI-written code if disclosed and understood, but not AI-written PR descriptions, commit messages, comments or review replies. Prepare code and notes; the user writes what gets posted. Draft commits on the fork carry `DRAFT ... (reword before PR)` subjects for that reason.
