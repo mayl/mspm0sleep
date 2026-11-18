@@ -1,32 +1,33 @@
 <!-- Draft reply for embassy-rs/embassy#7513. AI-drafted: rewrite in your own words before posting. -->
+<!-- Numbers: main and "fix" columns measured 2026-11-18 on main 2b69fd062 (after #7326). The 71f54dfee
+     numbers are from 2026-11-12 and have not been re-run. The fix has NOT yet been through the
+     wait_for_high sweep, bounce, hold, blinky and idle-current tests after the port: see
+     docs/UPSTREAM_GPIO_WAKE_PR.md. -->
 
-I ran my test rig against @CordlessCoder's `mspm0-low-power` branch (tip 71f54dfee) on an LP-MSPM0L1306. That is not the exact commit linked above (087b1c788), but the GPIO approach is the same: FASTWAKE while armed, both edges always detected, direction decided in the handler by reading DIN.
+I ran my rig against @CordlessCoder's `mspm0-low-power` branch (tip 71f54dfee) on an LP-MSPM0L1306. That is not the exact commit linked above (087b1c788), but the approach is the same: FASTWAKE while armed, both edges always detected, direction decided in the handler by reading DIN.
 
-It fixes what I reported. Chip confirmed asleep in each case, counts are edges seen / pulses sent:
+It fixes what I reported (STANDBY1: 20/20 at 833 us and 30 ms, also when re-armed with the pin still low; pin held low 10 s: asleep throughout, 21/21). One regression: short pulses are dropped in every deep-sleep mode, including STOP0 where main catches them. 8.7 us pulses: 0/20 everywhere. Width sweep in STANDBY1: 16 us and shorter 0/50, 17 us 15/50, 18 us and up all counted. The cause is the DIN read in the handler: if the pulse has ended by then, the event is taken for the opposite edge and discarded. Fine for a button, not for a short strobe.
 
-| Test | main | 71f54dfee |
-|---|---|---|
-| STANDBY1, 833 µs and 30 ms pulses | 0/20 | 20/20 |
-| STANDBY1, wait re-armed while pin still low | 0/20 | 20/20 |
-| Pin held low 10 s, then 21 edges | not run | 21/21, asleep throughout |
-| Bursts of bouncing edges, then 20 clean pulses | not run | 20/20 |
+GPIO_ERR_01 lists a second workaround: don't enter STANDBY1 while the pulse is still active. I have a draft on current main (after #7326) that does that: the polarity stays single-edge so the hardware latches the edge, and if the pin is already at the post-edge level when the wait starts, it first waits for the pin to leave it. That part is behind a `gpio_err_01` cfg; other chips only get fast wake.
 
-One regression: short pulses are dropped, in every deep-sleep mode.
+Counted out of 20 pulses, firmware does not touch FASTWAKE, chip asleep in every STOP/STANDBY cell:
 
-| 8.7 µs pulses | main | 71f54dfee |
-|---|---|---|
-| STOP0 | 20/20 | 0/20 |
-| STOP2 / STANDBY0 | 5/20, 4/20 | 0/20 |
-| STANDBY1 | 0/20 | 0/20 |
+| Idle mode | Pulse | L1306 main | L1306 fix | C1104 main | C1104 fix |
+|---|---|---|---|---|---|
+| STOP0 | any | 20 | 20 | 20 | 20 |
+| STOP2 | 8.7 us | 7 | 20 | 2 | 20 |
+| STANDBY0 | 8.7 us | 4 | 20 | 4 | 20 |
+| STOP2, STANDBY0 | 833 us, 30 ms | 20 | 20 | 20 | 20 |
+| STANDBY1 | 8.7 us, 833 us, 30 ms | 0 | 20 | 0 | 20 |
+| STANDBY1 | 30 ms, re-armed while low | 0 | 20 | 0 | 20 |
 
-Sweeping the width in STANDBY1: 16 µs and shorter 0/50, 17 µs 15/50, 18 µs and longer all counted.
+Width sweep with the fix, STANDBY1, 9 to 153 us in 1 us steps, 50 pulses each: none lost on either board.
 
-The cause is the DIN read in the handler: if the pulse has ended by then, the pin reads idle, the event is taken for the opposite edge and discarded. The handler comment already says so. Fine for a button, not for a short strobe from another chip.
+The C1104 does not show the erratum: with FASTWAKE set by hand on main, "re-armed while low" is 20/20 there and 1/20 on the L1306.
 
-GPIO_ERR_01 lists a second workaround: don't enter STANDBY1 while the pulse is still active. I have a draft that does that instead: the polarity stays single-edge so the hardware latches the edge, and if the pin is already at the post-edge level when the wait starts, it first waits for the pin to leave that level. Same tests as above all pass, and pulses are counted down to 8.7 µs (the shortest my rig makes).
+- Branch: https://github.com/mayl/embassy/tree/mspm0-gpio-wake-v2 (+120/-6, no API change)
+- Cost in the `button` example: 400 bytes of flash and 24 of RAM on L1306, 120 and 8 on C1104.
+- The `gpio_err_01` family list is in `build.rs` (G110x, G150x, G310x, G350x, L110x, L130x, L134x), since main's metadata has no errata yet.
+- Limits: one L1306 and one C1104 board, GPIOA only.
 
-- Branch: https://github.com/mayl/embassy/tree/mspm0-gpio-wake (on main, +114/−2 in `gpio.rs`, `build.rs` and the changelog, no API change)
-- Cost: 392 bytes of flash and 24 bytes of RAM in the `button` example on L1306. The erratum handling is behind a `gpio_err_01` cfg, set in `build.rs` from a family list (G110x, G150x, G310x, G350x, L110x, L130x, L134x) since main's metadata has no errata yet. Other chips only get fast wake.
-- Limits: tested on one L1306 board only. After a release, a new edge within about 60 µs can be missed (30 µs on 71f54dfee).
-
-Test scripts and raw results: https://github.com/mayl/mspm0sleep (`tools/edge_matrix.py`, `tools/edge_window.py`, `tools/edge_bounce.py`, `tools/edge_hold.py`). They pulse PA9 from the XDS110 backchannel UART and read counters back over SWD. Happy to rerun against any other commit.
+Test scripts and raw results: https://github.com/mayl/mspm0sleep (`tools/edge_all.sh`). They pulse the UART RX pin from the XDS110 backchannel UART and read counters back over SWD. Happy to rerun against any other commit.

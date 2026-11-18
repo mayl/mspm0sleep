@@ -58,11 +58,13 @@ Everything runs inside the Nix dev shell (Rust toolchain with `thumbv6m-none-eab
 # firmware (our crate, built against the embassy submodule)
 nix develop .# --command bash -c 'cd firmware && cargo build --release'
 # same idle firmware on the ordinary WFI executor, for comparison
-nix develop .# --command bash -c 'cd firmware && cargo build --release --no-default-features --features wfi,timer --bin lp_idle --target-dir target-wfi'
+nix develop .# --command bash -c 'cd firmware && cargo build --release --no-default-features --features wfi,timer,l1306 --bin lp_idle --target-dir target-wfi'
 
 # GPIO edge-wake test (no time driver): build+flash, then run the automated matrix
 nix develop .# --command tools/button_test.sh build
-nix develop .# --command python3 tools/edge_matrix.py 20      # pulses PA9 from the XDS110 UART
+nix develop .# --command python3 tools/edge_matrix.py 20      # pulses the UART RX pin from the XDS110 UART
+# the whole edge suite for one build; BOARD picks the LaunchPad (l1306 default, c1104), TARGET the cargo target dir
+BOARD=c1104 TARGET=target-c1104 nix develop .# --command tools/edge_all.sh my_label
 
 # flash + release debug holds + EnergyTrace capture + statistics
 nix develop .# --command tools/measure.sh lp_idle my_capture 20
@@ -73,12 +75,14 @@ nix run .#etrace -- live                      # interactive; needs a real termin
 tools/etrace/target/release/etrace view tools/energytrace/captures/lp_blinky_gpiofix.bin --dump 120x30
 ```
 
+With two LaunchPads plugged in, every tool takes `BOARD=l1306|c1104` (probe chosen by serial, `tools/unwedge/board.py`); etrace takes `ETRACE_SERIAL`. Never run two test scripts against the same board at once: they corrupt each other's probe traffic. A chip that boot-loops can be halted with `tools/unwedge/catch_reset.py`.
+
 Do NOT flash with a bare `probe-rs run/download` when the target is asleep: probe-rs 0.32 cannot attach to an MSPM0 in STOP/STANDBY. Use `tools/unwedge/unwedge.py wake` first and `release` afterwards (see `docs/UNWEDGE.md`).
 
 ## Architecture Overview
 
 - `embassy/` — submodule, **unmodified upstream** embassy (branch `mspm0l_lowpower` on the fork tracks `embassy-rs/embassy` main). Upstream provides MSPM0 deep sleep via `embassy_mspm0::executor::Executor` + the `low-power` feature; our own earlier sleep work was dropped in favour of it.
-- `firmware/` — measurement firmwares for LP-MSPM0L1306 (`lp_idle`, `lp_blinky`, `busy`).
+- `firmware/` — measurement firmwares for LP-MSPM0L1306 (`lp_idle`, `lp_blinky`, `busy`); `edge_test` also builds for LP-MSPM0C1104 (`--no-default-features --features lp,c1104`). A board feature (`l1306`, in the defaults, or `c1104`) is always required. Never add a `memory.x` to the crate root: the linker would use it instead of the per-board `memory-*.x`.
 - `tools/etrace` — the EnergyTrace utility (Rust lib + CLI): live terminal scope, headless capture, statistics, export. `tools/measure.sh` uses it. See its README.
 - `tools/energytrace/` — captures, reverse-engineering notes, and `repro-cli`, the scratch tool the protocol was worked out with (EEPROM dump, legacy flows). New work goes in `tools/etrace`.
 - `tools/unwedge/` — raw CMSIS-DAP access to MSPM0's PWR-AP: wake a sleeping chip for the debugger, and release it again.
@@ -89,7 +93,7 @@ Do NOT flash with a bare `probe-rs run/download` when the target is asleep: prob
 |------|---------|
 | `docs/UNWEDGE.md` | Why SWD "dies" on a sleeping/blank MSPM0, PWR-AP bits, recovery recipe, uhubctl caveat |
 | `docs/LOWPOWER_RESULTS.md` | Upstream embassy low-power verification + EnergyTrace measurements |
-| `docs/UPSTREAM_GPIO_WAKE_PR.md` | Draft upstream fix for GPIO wake (fork branch `mspm0-gpio-wake`): design notes, test evidence, what must be hand-written before a PR |
+| `docs/UPSTREAM_GPIO_WAKE_PR.md` | Draft upstream fix for GPIO wake (fork branch `mspm0-gpio-wake-v2`): design notes, test evidence, what must be hand-written before a PR |
 | `docs/CCS_MSPM0_LOWPOWER.md` | What TI CCS Theia does on connect/disconnect, DSSM mailbox commands (from GEL + disassembly) |
 | `tools/etrace/README.md` | Using etrace, what its numbers mean (resolution, offset, what is on the rail) |
 | `tools/energytrace/REVERSE_ENGINEERING.md` | XDS110 EnergyTrace USB protocol notes (historical; later sections supersede earlier ones) |

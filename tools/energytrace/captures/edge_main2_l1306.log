@@ -1,0 +1,227 @@
+== main2_l1306: board l1306, /home/larry/projects/claude/mspm0sleep/firmware/target-main-notimer/thumbv6m-none-eabi/release/edge_test, 2026-11-18T20:30:58+07:00
+released and reset
+== matrix
+released and reset
+WFI (control)        fastwake=0  8.7 us                     -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=0  833 us                     -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=0  30 ms                      -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=0  30 ms, re-sleep while low  -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=1  8.7 us                     -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=1  833 us                     -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=1  30 ms                      -> 20/20   (AHB-AP reachable after)
+released and reset
+WFI (control)        fastwake=1  30 ms, re-sleep while low  -> 20/20   (AHB-AP reachable after)
+released and reset
+STOP0                fastwake=0  8.7 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=0  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=0  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=0  30 ms, re-sleep while low  -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=1  8.7 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=1  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=1  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STOP0                fastwake=1  30 ms, re-sleep while low  -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=0  8.7 us                     -> 7/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=0  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=0  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=0  30 ms, re-sleep while low  -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=1  8.7 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=1  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=1  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STOP2                fastwake=1  30 ms, re-sleep while low  -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=0  8.7 us                     -> 4/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=0  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=0  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=0  30 ms, re-sleep while low  -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=1  8.7 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=1  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=1  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY0             fastwake=1  30 ms, re-sleep while low  -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=0  8.7 us                     -> 0/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=0  833 us                     -> 0/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=0  30 ms                      -> 0/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=0  30 ms, re-sleep while low  -> 0/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=1  8.7 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=1  833 us                     -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=1  30 ms                      -> 20/20   (AHB-AP gated after)
+released and reset
+STANDBY1 (default)   fastwake=1  30 ms, re-sleep while low  -> 1/20   (AHB-AP gated after)
+
+| Idle mode | FASTWAKE | 8.7 us | 833 us | 30 ms | 30 ms, re-sleep while low |
+|---|---|---|---|---|---|
+| WFI (control) | off | 20/20 | 20/20 | 20/20 | 20/20 |
+| WFI (control) | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP0 | off | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP0 | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STOP2 | off | 7/20 | 20/20 | 20/20 | 20/20 |
+| STOP2 | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | off | 4/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | on | 20/20 | 20/20 | 20/20 | 20/20 |
+| STANDBY1 (default) | off | 0/20 | 0/20 | 0/20 | 0/20 |
+| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 | 1/20 |
+== width sweep (firmware sets FASTWAKE: 1)
+released and reset
+plain wait_for_falling_edge                   145 widths x 50 pulses: 54 widths fully counted
+     63 us: 16/50 counted, 16 wakes, state 1
+     64 us: 1/50 counted, 1 wakes, state 1
+     65 us: 2/50 counted, 2 wakes, state 1
+     66 us: 8/50 counted, 8 wakes, state 1
+     67 us: 1/50 counted, 1 wakes, state 1
+     68 us: 4/50 counted, 4 wakes, state 1
+     69 us: 6/50 counted, 6 wakes, state 1
+     70 us: 4/50 counted, 4 wakes, state 1
+     71 us: 3/50 counted, 3 wakes, state 1
+     72 us: 1/50 counted, 1 wakes, state 1
+     73 us: 1/50 counted, 1 wakes, state 1
+     74 us: 1/50 counted, 1 wakes, state 1
+     75 us: 2/50 counted, 2 wakes, state 1
+     76 us: 2/50 counted, 2 wakes, state 1
+     77 us: 1/50 counted, 1 wakes, state 1
+     78 us: 2/50 counted, 2 wakes, state 1
+     79 us: 1/50 counted, 1 wakes, state 1
+     80 us: 2/50 counted, 2 wakes, state 1
+     81 us: 1/50 counted, 1 wakes, state 1
+     82 us: 2/50 counted, 2 wakes, state 1
+     83 us: 1/50 counted, 1 wakes, state 1
+     84 us: 1/50 counted, 1 wakes, state 1
+     85 us: 2/50 counted, 2 wakes, state 1
+     86 us: 1/50 counted, 1 wakes, state 1
+     87 us: 2/50 counted, 2 wakes, state 1
+     88 us: 1/50 counted, 1 wakes, state 1
+     89 us: 1/50 counted, 1 wakes, state 1
+     90 us: 1/50 counted, 1 wakes, state 1
+     91 us: 1/50 counted, 1 wakes, state 1
+     92 us: 1/50 counted, 1 wakes, state 1
+     93 us: 1/50 counted, 1 wakes, state 1
+     94 us: 1/50 counted, 1 wakes, state 1
+     95 us: 1/50 counted, 1 wakes, state 1
+     96 us: 1/50 counted, 1 wakes, state 1
+     97 us: 1/50 counted, 1 wakes, state 1
+     98 us: 1/50 counted, 1 wakes, state 1
+     99 us: 1/50 counted, 1 wakes, state 1
+     100 us: 1/50 counted, 1 wakes, state 1
+     101 us: 1/50 counted, 1 wakes, state 1
+     102 us: 1/50 counted, 1 wakes, state 1
+     103 us: 1/50 counted, 1 wakes, state 1
+     104 us: 1/50 counted, 1 wakes, state 1
+     105 us: 1/50 counted, 1 wakes, state 1
+     106 us: 1/50 counted, 1 wakes, state 1
+     107 us: 1/50 counted, 1 wakes, state 1
+     108 us: 1/50 counted, 1 wakes, state 1
+     109 us: 1/50 counted, 1 wakes, state 1
+     110 us: 1/50 counted, 1 wakes, state 1
+     111 us: 1/50 counted, 1 wakes, state 1
+     112 us: 1/50 counted, 1 wakes, state 1
+     113 us: 1/50 counted, 1 wakes, state 1
+     114 us: 1/50 counted, 1 wakes, state 1
+     115 us: 1/50 counted, 1 wakes, state 1
+     116 us: 1/50 counted, 1 wakes, state 1
+     117 us: 1/50 counted, 1 wakes, state 1
+     118 us: 1/50 counted, 1 wakes, state 1
+     119 us: 1/50 counted, 1 wakes, state 1
+     120 us: 1/50 counted, 1 wakes, state 1
+     121 us: 1/50 counted, 1 wakes, state 1
+     122 us: 1/50 counted, 1 wakes, state 1
+     123 us: 1/50 counted, 1 wakes, state 1
+     124 us: 1/50 counted, 1 wakes, state 1
+     125 us: 1/50 counted, 1 wakes, state 1
+     126 us: 1/50 counted, 1 wakes, state 1
+     127 us: 1/50 counted, 1 wakes, state 1
+     128 us: 1/50 counted, 1 wakes, state 1
+     129 us: 1/50 counted, 1 wakes, state 1
+     130 us: 1/50 counted, 1 wakes, state 1
+     131 us: 1/50 counted, 1 wakes, state 1
+     132 us: 1/50 counted, 1 wakes, state 1
+     133 us: 1/50 counted, 1 wakes, state 1
+     134 us: 1/50 counted, 1 wakes, state 1
+     135 us: 1/50 counted, 1 wakes, state 1
+     136 us: 1/50 counted, 1 wakes, state 1
+     137 us: 1/50 counted, 1 wakes, state 1
+     138 us: 1/50 counted, 1 wakes, state 1
+     139 us: 1/50 counted, 1 wakes, state 1
+     140 us: 1/50 counted, 1 wakes, state 1
+     141 us: 1/50 counted, 1 wakes, state 1
+     142 us: 1/50 counted, 1 wakes, state 1
+     143 us: 1/50 counted, 1 wakes, state 1
+     144 us: 1/50 counted, 1 wakes, state 1
+     145 us: 1/50 counted, 1 wakes, state 1
+     146 us: 1/50 counted, 1 wakes, state 1
+     147 us: 1/50 counted, 1 wakes, state 1
+     148 us: 1/50 counted, 1 wakes, state 1
+     149 us: 1/50 counted, 1 wakes, state 1
+     150 us: 1/50 counted, 1 wakes, state 1
+     151 us: 1/50 counted, 1 wakes, state 1
+     152 us: 1/50 counted, 1 wakes, state 1
+     153 us: 1/50 counted, 1 wakes, state 1
+released and reset
+released and reset
+released and reset
+released and reset
+check pin, then arm rising (wait_for_high)    145 widths x 50 pulses: 142 widths fully counted
+     37 us: 1/50 counted, 1 wakes, state 3
+     38 us: 1/50 counted, 1 wakes, state 3
+     39 us: 1/50 counted, 1 wakes, state 3
+== bounce
+released and reset
+STANDBY1  bursts of 5 x   9 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x  20 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x  30 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x  45 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x  60 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x  75 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x  90 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x 120 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x 200 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+STANDBY1  bursts of 5 x 500 us:   0 of 100 burst edges counted; then 0/20 clean pulses   <-- LOST
+released and reset
+STANDBY0  bursts of 5 x   9 us:  20 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  20 us:  20 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  30 us:  47 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  45 us:  47 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  60 us:  60 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  75 us:  60 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  90 us:  78 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x 120 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x 200 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x 500 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+== hold
+released and reset
+idle, pin high                     count  0  PA9 high  RIS 0 IMASK 1 FASTWAKE 0  asleep (AHB-AP power-gated)
+after 20 more pulses               count  0  PA9 high  RIS 0 IMASK 1 FASTWAKE 0  asleep (AHB-AP power-gated)
+counted 0 edges in total; expected 21 (one for the hold, 20 after it)
+== done 2026-11-18T20:47:24+07:00

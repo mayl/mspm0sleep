@@ -6,149 +6,136 @@ those have to be written by hand. Nothing has been posted upstream.
 
 ## Where it is
 
-- Branch `mspm0-gpio-wake` in the `embassy/` submodule, pushed to the fork
-  (`mayl/embassy`), based on upstream `main` at 5e697db33.
-- Three commits, `embassy-mspm0/src/gpio.rs` only (+ two changelog lines). The
-  commit subjects are placeholders marked `DRAFT n/3 (reword before PR)`.
-- The parent repo still pins the submodule to unmodified upstream
-  (`mspm0l_lowpower`). To build our firmware against the fix:
-  `git -C embassy checkout mspm0-gpio-wake`.
+- Branch **`mspm0-gpio-wake-v2`** in the `embassy/` submodule, pushed to the fork
+  (`mayl/embassy`), based on upstream `main` at 2b69fd062 (2026-11-18). That main
+  includes i509VCB's GPIO rework (#7326, merged 2026-11-17), which rewrote the
+  code the first draft changed.
+- Three commits, subjects marked `DRAFT n/3 (reword before PR)`: +120/-6 in
+  `gpio.rs` (+110), `build.rs` (+14) and the changelog (+2). No API change.
+- The first draft, `mspm0-gpio-wake` (four commits on main of 5e697db33), is
+  kept for reference. It no longer applies to main.
+- The parent repo pins the submodule to unmodified upstream
+  (`mspm0l_lowpower`, now 2b69fd062). To build the firmware against the fix:
+  `git -C embassy checkout mspm0-gpio-wake-v2`.
 
 Review with:
 
 ```bash
-git -C embassy log --oneline upstream/main..mspm0-gpio-wake
-git -C embassy diff upstream/main mspm0-gpio-wake            # everything
-git -C embassy show <commit>                                  # one step at a time
+git -C embassy log --oneline upstream/main..mspm0-gpio-wake-v2
+git -C embassy diff upstream/main mspm0-gpio-wake-v2          # everything
+git -C embassy show <commit>                                   # one step at a time
 ```
 
 ## The three changes
 
+All in `Flex<'d, Async>`; `Input` and `OutputOpenDrain` delegate to it.
+
 1. **Arm before reading the level** in `wait_for_high` / `wait_for_low`.
-   `wait_inner` is split into `arm()` (set polarity, clear the latched event;
-   the existing code, moved) and `wait_armed()` (the existing wait-map future,
-   moved). The level waits now call `arm()` first and read the pin afterwards,
-   as `embassy-stm32`'s `ExtiInput` does.
-2. **Fast wake while waiting.** `wait_armed()` holds a small guard that sets
-   the pin's `FASTWAKE` bit and clears it when the wait ends or is dropped.
-   Without the bit no GPIO edge is detected in STANDBY1 (TRM SLAU847F 2.9.4:
-   STANDBY1 leaves only "TIMG0, TIMG1, or asynchronous fast wake from GPIO ...").
-3. **GPIO_ERR_01** in edge waits. `wait_inner` becomes a three-step loop: if the
-   pin already sits at the level the edge leads to (say low, waiting for a
-   fall), it first waits for the opposite edge, then arms the real one. Every
-   step arms and then reads the pin, so the chip never sleeps armed for an edge
-   the pin level rules out. Any-edge waits are unchanged.
+   Upstream's `wait_inner` is split into `arm()` (set polarity, clear the latched
+   event; existing code, moved) and `wait_armed()` (the existing `poll_fn`,
+   moved). The level waits call `arm()` first and read the pin afterwards.
+2. **Fast wake while waiting.** `wait_armed()` creates a `FastWake` guard that
+   sets the pin's `FASTWAKE` bit; the future owns it, so the bit is cleared when
+   the wait ends or is dropped. Without the bit no GPIO edge is detected in
+   STANDBY1 (TRM SLAU847F 2.9.4).
+3. **GPIO_ERR_01**, only on affected families. `build.rs` (`get_chip_cfgs`) sets
+   a `gpio_err_01` cfg for G110x, G150x, G310x, G350x, L110x, L130x, L134x.
+   `wait_inner` has two `#[cfg]` versions:
+   - without the erratum: `arm(polarity)` then `wait_armed()`, which is what
+     upstream does today plus fast wake;
+   - with it: a three-step loop. If the pin already sits at the level the edge
+     leads to (say low, waiting for a fall), it first waits for the opposite
+     edge, then arms the real one. Every step arms and then reads the pin, so
+     the chip never sleeps armed for an edge the pin level rules out. Any-edge
+     waits are unchanged.
 
 ## Design choices you may want to question
 
-- **Loop instead of straight-line code in change 3.** A straight-line version
-  (arm, detour, arm again, each with its own `await`) reads more easily but is
-  420 bytes bigger, because `arm()` and the wait future get inlined at every
-  call site. Sizes of `examples/mspm0l1306` `button`, release:
+- **The erratum version is an `async fn`, the other is not.** Upstream's
+  `wait_inner` returns `impl Future` and arms when called. The loop arms on
+  first poll. Callers only ever `.await` it at once, so it should not matter,
+  but it is a difference between the two cfgs.
+- **Family list.** Copied from the errata metadata on CordlessCoder's branch
+  (`METADATA.has_erratum`), which upstream's pinned metapac does not have. Only
+  the L110x/L13xx sheet (SLAZ741E) was read here; check the G sheets. The
+  C1104 measurements below agree with it not being listed.
+- **Two `#[cfg]` functions rather than `if !cfg!(gpio_err_01) { return }`.**
+  The `if` form was tried on the first draft and made every chip 100 to 270
+  bytes larger: the second await stays in the future.
+- **Loop instead of straight-line code.** A straight-line version was 420 bytes
+  bigger on the first draft.
+- **Code size**, `button` example, release, Rust 1.100 (text / bss):
 
-  | | .text | .bss |
+  | Chip | main | with the fix |
   |---|---|---|
-  | upstream `main` | 12292 | 160 |
-  | + change 1 | 12348 | 168 |
-  | + change 2 | 12528 | 176 |
-  | + change 3, straight-line (not kept) | 13104 | 184 |
-  | + change 3, loop (kept) | 12684 | 184 |
+  | L1306 (erratum) | 9220 / 1124 | 9620 / 1148 (+400 / +24) |
+  | L2228 | 9376 / 1124 | 9568 / 1132 (+192 / +8) |
+  | C1104 | 7052 / 172 | 7172 / 180 (+120 / +8) |
 
-  Total cost: 392 bytes of flash and 24 bytes of RAM per task that waits on a
-  pin. The maintainer of this crate cares about both (see PR #7326).
-- **The erratum handling is gated (commit 4, 2026-11-18).** i509VCB asked on
-  #7513 for a `gpio_err_01` cfg. `build.rs` (`get_chip_cfgs`) sets it for the
-  families G110x, G150x, G310x, G350x, L110x, L130x, L134x; `wait_inner` has
-  two `#[cfg]` versions, the three-step loop and a plain arm-then-wait.
-  - The family list is copied from the errata metadata on CordlessCoder's
-    branch (`METADATA.has_erratum`), which upstream's pinned metapac does not
-    have yet. Only the L110x/L13xx sheet (SLAZ741E) was read here; check the
-    others before a PR.
-  - `if !cfg!(gpio_err_01) { ...; return }` was tried first and made every
-    chip larger (+100 to +270 bytes): the second await stays in the future.
-  - `button` example, whole image, before and after the gate: L1306 15368 and
-    15368 (affected, unchanged); L2228 16412 and 16192; C1104 11448 and 11288.
-  - The arm-then-wait version is built for the unaffected chips but has not
-    run on hardware: there is no such board here.
-  - Fast wake and change 1 stay ungated, with or without `low-power`.
 - **Fast wake is cleared when no wait is pending.** With the bit left on, any
   activity on the pin requests the fast clock even when nobody is waiting (note
   at the end of TRM 9.2.3). The cost is one more critical section per wait.
-- **`IMASK` is still not cleared when a wait future is dropped.** That is
-  existing behaviour and was left alone to keep the scope narrow.
-- **Order of the two reads in change 3.** The pin level is read before the
-  event flag. The argument: an edge after arming either is not yet visible in
-  the level (so the pin is "not at the level" and we wait normally) or has set
-  the flag by the time it is read. The other order has a window.
-- **Stale comment not touched.** `low_power/mod.rs` already says the STANDBY1
-  half of GPIO_ERR_01 "is handled". With this change that becomes true.
-- **Conflict with PR #7326** (GPIO interrupt bindings, open, same file). It
-  rewrites `wait_inner`; whichever lands second needs a rebase.
+- **`IMASK` is still not cleared when a wait future is dropped.** Existing
+  behaviour, left alone.
+- **Order of the two reads in the loop.** The pin level is read before the
+  event flag: an edge after arming is then seen in at least one of them.
 
-## Test evidence (LP-MSPM0L1306, patched HAL, firmware does not touch FASTWAKE)
+## Test evidence (2026-11-18)
 
-All runs are with the final code (commit 3ff39ab4c). "Before" is unmodified
-upstream, from `docs/LOWPOWER_RESULTS.md`. Pulses go into PA9 from the XDS110
-UART; counters are read over SWD.
+Two boards: LP-MSPM0L1306 (has GPIO_ERR_01) and LP-MSPM0C1104 (not listed).
+Pulses go into the UART RX pin (PA9 / PA26) from the XDS110; counters are read
+over SWD. "main" is unmodified upstream 2b69fd062, "fix" is 1d1fcc22f. One
+command per build: `BOARD=... TARGET=... tools/edge_all.sh <label>`. Raw output:
+`tools/energytrace/captures/edge_{main2,port}_{l1306,c1104}.log` and
+`edge_matrix_*.json`.
 
-**Idle-mode matrix**, timer-free firmware, 20 pulses per cell
-(`FWS=0 OUT=edge_matrix_fix.json tools/edge_matrix.py`):
+**The run of the fix is incomplete.** The machine ran low on memory and the
+background jobs were stopped. Done: everything on main, and for the fix the
+matrix and the first width sweep on both boards. Not yet run on the port: the
+`wait_for_high` width sweep, bounce, pin-held-low, the timer-based blinky and
+the idle current. The first draft passed all of those on the L1306
+(2026-11-12, table at the end).
 
-| Idle mode | 8.7 us | 833 us | 30 ms | 30 ms, re-armed while low |
-|---|---|---|---|---|
-| WFI, STOP0 | 20/20 | 20/20 | 20/20 | 20/20 |
-| STOP2 | 20/20 (before: 5) | 20/20 | 20/20 | 20/20 |
-| STANDBY0 | 20/20 (before: 4) | 20/20 | 20/20 | 20/20 |
-| STANDBY1 (default) | 20/20 (before: 0) | 20/20 (before: 0) | 20/20 (before: 0) | 20/20 (before: 0; 1 with FASTWAKE set by hand) |
+**Idle-mode matrix**, timer-free firmware, firmware leaves FASTWAKE alone,
+counted / 20 pulses. Chip confirmed asleep after every STOP and STANDBY cell.
 
-**Pulse-width sweep**, STANDBY1, re-armed immediately, 50 pulses per width
-(`STRATS=0,2 FW=0 tools/edge_window.py 50`, and again with `WIDTHS=40:120:1`):
+| Idle mode | Pulse | L1306 main | L1306 fix | C1104 main | C1104 fix |
+|---|---|---|---|---|---|
+| WFI, STOP0 | all four shapes | 20 | 20 | 20 | 20 |
+| STOP2 | 8.7 us | 7 | 20 | 2 | 20 |
+| STOP2 | 833 us, 30 ms, 30 ms re-armed while low | 20 | 20 | 20 | 20 |
+| STANDBY0 | 8.7 us | 4 | 20 | 4 | 20 |
+| STANDBY0 | 833 us, 30 ms, 30 ms re-armed while low | 20 | 20 | 20 | 20 |
+| STANDBY1 (default) | 8.7 us, 833 us, 30 ms | 0 | 20 | 0 | 20 |
+| STANDBY1 (default) | 30 ms, re-armed while low | 0 | 20 | 0 | 20 |
 
-| Firmware pattern | 64 widths, 9 to 833 us | 81 widths, 40 to 120 us in 1 us steps |
+**The erratum, isolated**: main with FASTWAKE set by the test firmware, i.e.
+what change 2 alone would give.
+
+| | L1306 | C1104 |
 |---|---|---|
-| plain `wait_for_falling_edge()` in a loop | 64 of 64 | 81 of 81 |
-| `wait_for_high()`, then `wait_for_falling_edge()` | 64 of 64 (before: stuck at 74 and 76 us) | 81 of 81 |
+| STANDBY1, 30 ms pulse, re-armed while low | **1/20** | 20/20 |
+| Width sweep 9 to 153 us in 1 us steps, 50 pulses each, plain falling wait, re-armed at once | 54 of 145 widths; from 63 us up almost every width counts 1 of 50 | 145 of 145 |
 
-That is 14,500 pulses with none lost.
+So the C1104 does not have the deaf state and the L1306 does, which is what
+the cfg assumes.
 
-**Each change on its own:**
+**Width sweep with the fix** (STANDBY1, 9 to 153 us in 1 us steps, 50 pulses
+each, plain `wait_for_falling_edge()` in a loop, HAL sets FASTWAKE): 145 of 145
+widths fully counted on both boards (7,250 pulses each).
 
-- Change 1 alone (FASTWAKE set by the firmware): the `wait_for_high()` sweep
-  goes from 62 of 64 widths to 64 of 64.
-- Changes 1 and 2: STANDBY1 goes from 0/20 to 20/20 in the first three
-  columns; the "re-armed while low" cell is 1/20, which is the erratum.
-- Change 3 turns that cell into 20/20.
+**`wait_for_high()` then `wait_for_falling_edge()`** on main with firmware-set
+FASTWAKE: L1306 stuck at 37, 38, 39 us (1 of 50, firmware left waiting for a
+level that had already come); C1104 half the pulses lost at 43 to 46 us. That
+is the race change 1 closes. Not yet re-run with the fix.
 
-**Bounce stress** (`tools/edge_bounce.py`): bursts of five pulses with bit
-times from 9 to 500 us (20 bursts each), then 20 clean pulses. STANDBY1 and
-STANDBY0: the 20 clean pulses were counted 20/20 after every burst width.
-Edges inside the fast bursts are not all counted (20 to 60 of 100 below
-60 us, 100 of 100 from 60 us up), which is expected: they arrive faster than
-the firmware can handle them.
+**Bounce and pin-held-low on main**: nothing counted in STANDBY1 on either
+board (0 of 21 in the hold test), as expected without fast wake.
 
-**Pin held low** (`tools/edge_hold.py`, UART break): the firmware counts the
-falling edge, re-arms with the pin still low and so waits for the rising edge
-first. Held for 10 s, the chip was asleep at 5 s and at 10 s (AHB-AP
-power-gated, count still 1), and counted 20/20 pulses after release. Repeated
-with no SWD reads in between (`QUIET=1`): 21 of 21 edges in total.
-
-**Timer-based firmware** (`lp_blinky`, 50 ms timer debounce, default idle
-mode, `tools/edge_blinky.py`): 20/20 at 833 us, 30 ms and 60 ms (before: 0/20,
-2 to 4/20, 4/20).
-
-**Idle current** (EnergyTrace, J15 removed): `lp_blinky` waiting on two pins
-has a floor of 20 pulses/s (2.1 uA), the same 20 pulses/s as before the change
-and as `lp_idle`, which uses no GPIO wait. One pulse/s is about 0.5 uA, so any
-cost of fast wake is below that.
-
-**Builds:** all 18 feature sets in `embassy-mspm0`'s CI build list and
-`examples/mspm0l1306` compile without warnings. Nightly rustfmt
-(1.12.0-nightly, 2026-11-09) with the repo's `rustfmt.toml` reports no changes
-for `gpio.rs`.
-
-**By hand** (2026-11-12): with `lp_blinky` built against the fix, Larry
-confirmed that pressing S2 (PA14, a real button with bounce) works in the
-default idle mode. Presses were not counted.
+**Builds:** all 18 feature sets in `embassy-mspm0`'s CI build list compile at
+the tip without new warnings; commits 1 and 2 compile on their own for L1306
+and C1104; `button` builds for L1306, L2228, C1104. rustfmt (1.100 stable, the
+repo's `rustfmt.toml`) reports no changes for `gpio.rs` and `build.rs`.
 
 ## What only you can do before opening a PR
 
@@ -156,19 +143,15 @@ default idle mode. Presses were not counted.
   line of AI-written code").
 - Reword the three commit messages and write the PR description yourself, and
   say in it that the code was written with an LLM.
-- Run `./fmtall.sh` with the repo's pinned nightly (`nightly-2026-08-26`) if
-  you change anything. A newer nightly rustfmt was run here on `gpio.rs` only.
-- Decide whether to wait for a maintainer reply on #7513 first.
-- Mark the PR ready only when CI passes; that is what puts it in the review
-  queue (`CONTRIBUTING.md`).
+- Run `./fmtall.sh` with the repo's pinned nightly if you change anything.
+- Mark the PR ready only when CI passes (`CONTRIBUTING.md`).
 
 ## Not tested
 
-- Any chip other than the MSPM0L1306, and ports other than GPIOA.
-- GPIO_ERR_01 case 1 (STANDBY0, pin de-asserted for under 3 LFCLK cycles) as
-  a separate case; the bounce test below goes through that range without loss.
-- CI itself (only the `embassy-mspm0` build matrix from its `Cargo.toml` and
-  `examples/mspm0l1306` were built locally).
+- The rest of the suite on the port (see above).
+- Chips other than MSPM0L1306 and MSPM0C1104; ports other than GPIOA.
+- An affected G-family chip.
+- CI itself.
 
 ## The fix the maintainers pointed to (tested 2026-11-12)
 
@@ -197,9 +180,10 @@ add the firmware feature `cordless-api`, e.g.
 The first run was made without `low-power`: everything passed, but the per-cell sleep check
 showed the chip had never left plain WFI, so that run was thrown away.
 
-Results, same rig and scripts as above, chip confirmed asleep in every deep-sleep cell:
+Results from 2026-11-12, before the port, chip confirmed asleep in every deep-sleep cell. Their branch
+has not been re-run since; the other two columns are superseded by the tables above:
 
-| Test | Upstream main | CordlessCoder 71f54dfee | Draft `mspm0-gpio-wake` |
+| Test (L1306, 2026-11-12) | Upstream main before #7326 | CordlessCoder 71f54dfee | First draft `mspm0-gpio-wake` |
 |---|---|---|---|
 | STANDBY1, 833 us and 30 ms pulses | 0/20 | 20/20 | 20/20 |
 | STANDBY1, 30 ms, re-armed while low | 0/20 | 20/20 | 20/20 |
