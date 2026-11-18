@@ -25,8 +25,8 @@ The cause is the DIN read in the handler: if the pulse has ended by then, the pi
 
 GPIO_ERR_01 lists a second workaround: don't enter STANDBY1 while the pulse is still active. I have a draft that does that instead: the polarity stays single-edge so the hardware latches the edge, and if the pin is already at the post-edge level when the wait starts, it first waits for the pin to leave that level. Same tests as above all pass, and pulses are counted down to 8.7 µs (the shortest my rig makes).
 
-- Branch: https://github.com/mayl/embassy/tree/mspm0-gpio-wake (on main, `gpio.rs` +93/−2, no API change)
-- Cost: 392 bytes of flash and 24 bytes of RAM in the `button` example. It is not gated on a `gpio_err_01` cfg yet.
+- Branch: https://github.com/mayl/embassy/tree/mspm0-gpio-wake (on main, +114/−2 in `gpio.rs`, `build.rs` and the changelog, no API change)
+- Cost: 392 bytes of flash and 24 bytes of RAM in the `button` example on L1306. The erratum handling is behind a `gpio_err_01` cfg, set in `build.rs` from a family list (G110x, G150x, G310x, G350x, L110x, L130x, L134x) since main's metadata has no errata yet. Other chips only get fast wake.
 - Limits: tested on one L1306 board only. After a release, a new edge within about 60 µs can be missed (30 µs on 71f54dfee).
 
 Test scripts and raw results: https://github.com/mayl/mspm0sleep (`tools/edge_matrix.py`, `tools/edge_window.py`, `tools/edge_bounce.py`, `tools/edge_hold.py`). They pulse PA9 from the XDS110 backchannel UART and read counters back over SWD. Happy to rerun against any other commit.

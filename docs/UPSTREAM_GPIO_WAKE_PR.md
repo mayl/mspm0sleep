@@ -56,10 +56,21 @@ git -C embassy show <commit>                                  # one step at a ti
 
   Total cost: 392 bytes of flash and 24 bytes of RAM per task that waits on a
   pin. The maintainer of this crate cares about both (see PR #7326).
-- **Not feature-gated.** Fast wake and the erratum handling are compiled in
-  for every chip and with or without `low-power`. That keeps the diff small.
-  The erratum is listed for L and G parts only; C and H parts pay the bytes
-  without (as far as the errata sheets say) needing them.
+- **The erratum handling is gated (commit 4, 2026-11-18).** i509VCB asked on
+  #7513 for a `gpio_err_01` cfg. `build.rs` (`get_chip_cfgs`) sets it for the
+  families G110x, G150x, G310x, G350x, L110x, L130x, L134x; `wait_inner` has
+  two `#[cfg]` versions, the three-step loop and a plain arm-then-wait.
+  - The family list is copied from the errata metadata on CordlessCoder's
+    branch (`METADATA.has_erratum`), which upstream's pinned metapac does not
+    have yet. Only the L110x/L13xx sheet (SLAZ741E) was read here; check the
+    others before a PR.
+  - `if !cfg!(gpio_err_01) { ...; return }` was tried first and made every
+    chip larger (+100 to +270 bytes): the second await stays in the future.
+  - `button` example, whole image, before and after the gate: L1306 15368 and
+    15368 (affected, unchanged); L2228 16412 and 16192; C1104 11448 and 11288.
+  - The arm-then-wait version is built for the unaffected chips but has not
+    run on hardware: there is no such board here.
+  - Fast wake and change 1 stay ungated, with or without `low-power`.
 - **Fast wake is cleared when no wait is pending.** With the bit left on, any
   activity on the pin requests the fast clock even when nobody is waiting (note
   at the end of TRM 9.2.3). The cost is one more critical section per wait.
