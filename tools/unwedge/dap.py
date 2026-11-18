@@ -4,6 +4,7 @@ Gives raw DP/AP register access so we can talk to MSPM0's vendor access
 ports (PWR-AP, SEC-AP, CFG-AP) that generic ARM tooling ignores.
 """
 import glob, os, struct, time
+import board
 
 
 class DapError(Exception):
@@ -20,9 +21,9 @@ def find_hidraw(vid=0x0451, pid=0xBEF3):
             ue = open(h + "/device/uevent").read()
         except OSError:
             continue
-        if "HID_ID=0003:%08X:%08X" % (vid, pid) in ue:
+        if "HID_ID=0003:%08X:%08X" % (vid, pid) in ue and "HID_UNIQ=" + board.SERIAL in ue:
             return "/dev/" + os.path.basename(h)
-    raise DapError("no XDS110 CMSIS-DAP hidraw node found")
+    raise DapError("no XDS110 CMSIS-DAP hidraw node with serial %s... found (BOARD=%s)" % (board.SERIAL, board.NAME))
 
 
 class Dap:

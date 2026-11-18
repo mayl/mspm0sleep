@@ -81,14 +81,25 @@ struct Usb {
 impl Usb {
     fn open(verbose: bool) -> Result<Usb> {
         let ctx = Context::new()?;
+        // With several LaunchPads plugged in, ETRACE_SERIAL (a serial number or its start) picks one.
+        let want = std::env::var("ETRACE_SERIAL").ok().filter(|w| !w.is_empty());
         let device = ctx
             .devices()?
             .iter()
             .find(|d| {
-                d.device_descriptor()
-                    .is_ok_and(|desc| desc.vendor_id() == TI_VID && XDS110_PIDS.contains(&desc.product_id()))
+                let Ok(desc) = d.device_descriptor() else { return false };
+                if desc.vendor_id() != TI_VID || !XDS110_PIDS.contains(&desc.product_id()) {
+                    return false;
+                }
+                let Some(want) = &want else { return true };
+                d.open()
+                    .and_then(|h| h.read_serial_number_string_ascii(&desc))
+                    .is_ok_and(|serial| serial.starts_with(want.as_str()))
             })
-            .ok_or("no XDS110 probe found on USB")?;
+            .ok_or_else(|| match &want {
+                Some(want) => format!("no XDS110 probe with serial {want}... found on USB"),
+                None => "no XDS110 probe found on USB".to_string(),
+            })?;
         // The handle is never reset: on this probe a USB reset drops it off the bus until it is replugged.
         let handle = device.open()?;
         for iface in [CMD_IFACE, DATA_IFACE] {

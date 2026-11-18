@@ -15,10 +15,10 @@ import fcntl, os, sys, termios, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools", "unwedge"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-import unwedge, uart_pulse
+import board, unwedge, uart_pulse
 from edge_matrix_common import with_dap
 
-ELF = os.path.join(ROOT, "firmware/target-notimer/thumbv6m-none-eabi/release/edge_test")
+ELF = board.ELF
 HOLD = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0
 WORD = 0x002
 
@@ -31,8 +31,8 @@ def peek(label, always=False):
         return None
     r = with_dap(unwedge.peek, ELF, True)
     print("%-34s count %2d  PA9 %s  RIS %d IMASK %d FASTWAKE %d  %s" % (
-        label, r["uart"], "high" if r["DIN"] >> 9 & 1 else "LOW ", r["RIS"] >> 9 & 1, r["IMASK"] >> 9 & 1,
-        r["FASTWAKE"] >> 9 & 1, "asleep (AHB-AP power-gated)" if r["gated"] else "AWAKE (AHB-AP reachable)"), flush=True)
+        label, r["uart"], "high" if r["DIN"] >> board.RX_BIT & 1 else "LOW ", r["RIS"] >> board.RX_BIT & 1, r["IMASK"] >> board.RX_BIT & 1,
+        r["FASTWAKE"] >> board.RX_BIT & 1, "asleep (AHB-AP power-gated)" if r["gated"] else "AWAKE (AHB-AP reachable)"), flush=True)
     return r
 
 

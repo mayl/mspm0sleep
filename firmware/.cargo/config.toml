@@ -6,3 +6,5 @@ target = "thumbv6m-none-eabi"
 
 [env]
 DEFMT_LOG = "info"
+# The MSPM0C1104 has 1 KB of RAM.
+DEFMT_RTT_BUFFER_SIZE = "64"

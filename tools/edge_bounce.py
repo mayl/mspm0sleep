@@ -17,10 +17,10 @@ import os, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools", "unwedge"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-import unwedge, uart_pulse
+import board, unwedge, uart_pulse
 from edge_matrix_common import with_dap
 
-ELF = os.path.join(ROOT, "firmware/target-notimer/thumbv6m-none-eabi/release/edge_test")
+ELF = board.ELF
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 CAPS = [int(x) for x in os.environ.get("CAPS", "0,1").split(",")]
 FW = int(os.environ.get("FW", "0"))
@@ -52,9 +52,10 @@ for cap in CAPS:
         os.close(fd)
         time.sleep(0.2)
         mid = peek()
+        burst = mid["uart"] - before["uart"]
         uart_pulse.pulses(N, 1200, 0xFF, 0.15)
         time.sleep(0.3)
         after = peek()
         got = after["uart"] - mid["uart"]
         print("%-9s bursts of 5 x %3d us: %3d of 100 burst edges counted; then %d/%d clean pulses%s"
-              % (NAMES[cap], bit, mid["uart"] - before["uart"], got, N, "" if got == N else "   <-- LOST"), flush=True)
+              % (NAMES[cap], bit, burst, got, N, "" if got == N else "   <-- LOST"), flush=True)

@@ -6,28 +6,63 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use defmt_rtt as _;
 use panic_probe as _;
 
-// On CordlessCoder's embassy branch the GPIO interrupt has to be bound by the application.
+// Board: which chip, and which pins carry LED1, S2 and the XDS110 backchannel UART's TXD.
+#[cfg(feature = "l1306")]
+mod board {
+    pub use embassy_mspm0::peripherals::{PA9 as RxPin, PA14 as S2Pin};
+    pub const S2_BIT: usize = 14;
+    pub const RX_BIT: usize = 9;
+    pub const SYSOSC_MHZ: u64 = 32;
+    #[allow(unused_macros)]
+    macro_rules! pins {
+        ($p:ident) => {
+            ($p.PA0, $p.PA14, $p.PA9)
+        };
+    }
+    #[allow(unused_imports)]
+    pub(crate) use pins;
+}
+#[cfg(feature = "c1104")]
+mod board {
+    pub use embassy_mspm0::peripherals::{PA16 as S2Pin, PA26 as RxPin};
+    pub const S2_BIT: usize = 16;
+    pub const RX_BIT: usize = 26;
+    pub const SYSOSC_MHZ: u64 = 24;
+    #[allow(unused_macros)]
+    macro_rules! pins {
+        ($p:ident) => {
+            ($p.PA22, $p.PA16, $p.PA26)
+        };
+    }
+    #[allow(unused_imports)]
+    pub(crate) use pins;
+}
+use board::{RX_BIT, S2_BIT};
+
+// On CordlessCoder's embassy branch one handler serves the whole port.
 #[cfg(feature = "cordless-api")]
 embassy_mspm0::bind_group_interrupts!(struct Irqs {
     GPIOA => embassy_mspm0::gpio::InterruptHandler;
 });
+// On upstream each pin has its own handler. L1306 routes GPIOA through interrupt group 1.
+#[cfg(all(not(feature = "cordless-api"), feature = "l1306"))]
+embassy_mspm0::bind_interrupts!(struct Irqs {
+    GROUP1 => embassy_mspm0::gpio::InterruptHandler<board::S2Pin>, embassy_mspm0::gpio::InterruptHandler<board::RxPin>;
+});
+#[cfg(all(not(feature = "cordless-api"), feature = "c1104"))]
+embassy_mspm0::bind_interrupts!(struct Irqs {
+    GPIOA => embassy_mspm0::gpio::InterruptHandler<board::S2Pin>, embassy_mspm0::gpio::InterruptHandler<board::RxPin>;
+});
 
-/// An input that can wait for edges, on either embassy API.
-#[cfg(feature = "cordless-api")]
+/// An input that can wait for edges.
 pub type EdgeInput = embassy_mspm0::gpio::Input<'static, embassy_mspm0::mode::Async>;
-#[cfg(not(feature = "cordless-api"))]
-pub type EdgeInput = embassy_mspm0::gpio::Input<'static>;
 
-/// An input with its pull-up on, able to wait for edges, on either embassy API.
+/// An input with its pull-up on, able to wait for edges.
 #[allow(unused_macros)]
 macro_rules! pull_up_input {
-    ($pin:expr) => {{
-        #[cfg(feature = "cordless-api")]
-        let input = embassy_mspm0::gpio::Input::new_async($pin, crate::Irqs, embassy_mspm0::gpio::Pull::Up);
-        #[cfg(not(feature = "cordless-api"))]
-        let input = embassy_mspm0::gpio::Input::new($pin, embassy_mspm0::gpio::Pull::Up);
-        input
-    }};
+    ($pin:expr) => {
+        embassy_mspm0::gpio::Input::new_async($pin, crate::Irqs, embassy_mspm0::gpio::Pull::Up)
+    };
 }
 
 /// Stay in RUN, CPU spinning, for ~3 s after reset before any sleep is allowed.
@@ -43,9 +78,9 @@ pub fn attach_window() {
 
 /// Busy-wait with the CPU awake. `cortex_m::asm::delay(n)` takes 3 cycles per
 /// count on Cortex-M0+ (measured: a nominal 3 s came out as 9.0 s), and SYSOSC
-/// is 32 MHz, so one microsecond is 32/3 counts.
+/// is 32 MHz (24 MHz on C1104), so one microsecond is 32/3 counts.
 pub fn spin_us(us: u32) {
-    cortex_m::asm::delay(((us as u64 * 32) / 3) as u32);
+    cortex_m::asm::delay(((us as u64 * board::SYSOSC_MHZ) / 3) as u32);
 }
 
 /// How `blinky` arranges for the button (a GPIO edge) to be seen while idle.
@@ -96,9 +131,10 @@ pub async fn blinky(spawner: embassy_executor::Spawner, wake: ButtonWake) -> ! {
 
     attach_window();
     let p = embassy_mspm0::init(embassy_mspm0::Config::default());
-    let mut led = Output::new(p.PA0, Level::High); // off
-    let s2 = pull_up_input!(p.PA14);
-    let rx = pull_up_input!(p.PA9);
+    let (led, s2, rx) = board::pins!(p);
+    let mut led = Output::new(led, Level::High); // off
+    let s2 = pull_up_input!(s2);
+    let rx = pull_up_input!(rx);
     // Same encoding as BTN_CFG, plus bit 4 = "timer-based blinky firmware".
     BTN_STATS.mode.store(
         0x10 | match wake {
@@ -115,8 +151,8 @@ pub async fn blinky(spawner: embassy_executor::Spawner, wake: ButtonWake) -> ! {
         ButtonWake::Default => None,
         ButtonWake::FastWake => {
             embassy_mspm0::pac::GPIOA.fastwake().modify(|w| {
-                w.set_din(14, true);
-                w.set_din(9, true);
+                w.set_din(S2_BIT, true);
+                w.set_din(RX_BIT, true);
             });
             None
         }
@@ -177,7 +213,11 @@ pub static BTN_STATS: BtnStats = BtnStats {
 };
 
 /// Test configuration, written over SWD and kept across an NRST reset
-/// (`.uninit` is not zeroed by the runtime): `[0xC0F16A11, word]`.
+/// (`.uninit` is not zeroed by the runtime): `[0xC0F16A11, word]`, eight times over.
+///
+/// Eight copies because something that runs before this firmware (the boot ROM, presumably) writes
+/// to a few words of low RAM after a reset: on one build that hit the single copy there was then,
+/// `0xC0F16A11` came back as `0xC0F10001`. The first intact copy is used.
 ///
 /// word bits 11:8  idle cap: 0 none (STANDBY1), 1 STANDBY0, 2 STOP2, 3 STOP0, 4 WFI only
 ///      bit 0      set GPIOA.FASTWAKE for both test pins
@@ -193,7 +233,7 @@ pub static BTN_STATS: BtnStats = BtnStats {
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".uninit.BTN_CFG")]
-pub static mut BTN_CFG: [core::mem::MaybeUninit<u32>; 2] = [core::mem::MaybeUninit::uninit(); 2];
+pub static mut BTN_CFG: [core::mem::MaybeUninit<u32>; 16] = [core::mem::MaybeUninit::uninit(); 16];
 
 /// Count falling edges on S2 (PA14) and on PA9, toggling LED1 (PA0) on each.
 ///
@@ -210,17 +250,20 @@ pub async fn edge_test() -> ! {
     let p = embassy_mspm0::init(embassy_mspm0::Config::default());
     let cfg = unsafe {
         let c = core::ptr::addr_of!(BTN_CFG) as *const u32;
-        if c.read_volatile() == 0xC0F1_6A11 { c.add(1).read_volatile() } else { 0 }
+        (0..8)
+            .find(|&i| c.add(2 * i).read_volatile() == 0xC0F1_6A11)
+            .map_or(0, |i| c.add(2 * i + 1).read_volatile())
     };
     let (cap, fastwake, resleep) = ((cfg >> 8) & 0xF, cfg & 1 != 0, cfg & 2 != 0);
 
-    let mut led = Output::new(p.PA0, Level::High); // active low: off
-    let mut s2 = pull_up_input!(p.PA14);
-    let mut rx = pull_up_input!(p.PA9);
+    let (led, s2, rx) = board::pins!(p);
+    let mut led = Output::new(led, Level::High); // active low: off
+    let mut s2 = pull_up_input!(s2);
+    let mut rx = pull_up_input!(rx);
     if fastwake {
         embassy_mspm0::pac::GPIOA.fastwake().modify(|w| {
-            w.set_din(14, true);
-            w.set_din(9, true);
+            w.set_din(S2_BIT, true);
+            w.set_din(RX_BIT, true);
         });
     }
     // A guard at a level forbids that level and everything deeper.
@@ -244,8 +287,8 @@ pub async fn edge_test() -> ! {
         use core::pin::pin;
         use core::task::Poll;
         let g = embassy_mspm0::pac::GPIOA;
-        let high = || g.din31_0().read().0 & (1 << 9) != 0;
-        let latched = || g.cpu_int().ris().read().0 & (1 << 9) != 0;
+        let high = || g.din31_0().read().0 & (1 << RX_BIT) != 0;
+        let latched = || g.cpu_int().ris().read().0 & (1 << RX_BIT) != 0;
         loop {
             {
                 BTN_STATS.state.store(1, Ordering::Relaxed);
@@ -276,7 +319,7 @@ pub async fn edge_test() -> ! {
         if resleep && strategy == 1 {
             let g = embassy_mspm0::pac::GPIOA;
             let _ = g.din31_0().read();
-            g.cpu_int().iclr().write(|w| w.set_dio(9, true));
+            g.cpu_int().iclr().write(|w| w.set_dio(RX_BIT, true));
             let _ = g.din31_0().read();
             let _ = g.cpu_int().ris().read();
         }

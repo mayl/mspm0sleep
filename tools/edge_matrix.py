@@ -17,10 +17,10 @@ import json, os, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools", "unwedge"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-import unwedge, uart_pulse
+import board, unwedge, uart_pulse
 from edge_matrix_common import with_dap
 
-ELF = os.path.join(ROOT, "firmware/target-notimer/thumbv6m-none-eabi/release/edge_test")
+ELF = board.ELF
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 CAPS = [(4, "WFI (control)"), (3, "STOP0"), (2, "STOP2"), (1, "STANDBY0"), (0, "STANDBY1 (default)")]
 CAPS = [c for c in CAPS if str(c[0]) in os.environ.get("CAPS", "4,3,2,1,0").split(",")]
@@ -43,7 +43,8 @@ def run_cell(word, baud, byte):
     time.sleep(1.5)                                # let it settle into its idle mode, untouched
     uart_pulse.pulses(N, baud, byte, 0.15)
     time.sleep(0.3)
-    return with_dap(unwedge.peek, ELF, True)
+    r = with_dap(unwedge.peek, ELF, True)
+    return r if r["ok"] and r["mode"] == word else None
 
 
 rows, results = [], []
@@ -56,7 +57,7 @@ for cap, capname in CAPS:
             got = None if r is None else r["uart"]
             results.append(dict(cap=capname, fastwake=bool(fw), shape=label, sent=N, counted=got,
                                 asleep=None if r is None else r["gated"],
-                                ris9=None if r is None else (r["RIS"] >> 9) & 1))
+                                ris9=None if r is None else (r["RIS"] >> board.RX_BIT) & 1))
             cells.append("boot?" if got is None else "%d/%d" % (got, N))
             print("%-20s fastwake=%d  %-26s -> %s%s" % (capname, fw, label, cells[-1],
                   "" if r is None else "   (AHB-AP %s after)" % ("gated" if r["gated"] else "reachable")), flush=True)

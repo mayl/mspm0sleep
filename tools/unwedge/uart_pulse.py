@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive falling edges onto the target's PA9 from the XDS110 backchannel UART.
+"""Drive falling edges onto the target's UART RX pin (PA9 on L1306, PA26 on C1104) from the XDS110 backchannel UART.
 
 A UART line idles high. Sending 0xFF gives exactly one low pulse, the start
 bit, 1/baud wide. Sending 0x00 gives a low pulse 9 bit-times wide.
@@ -11,6 +11,7 @@ Measured on XDS110 firmware 03.00.00.22: widths are right from 150 baud up
 usage: uart_pulse.py <count> <baud> [byte=0xff] [gap_s=0.25]
 """
 import glob, os, sys, termios, time
+import board
 
 
 def find_tty():
@@ -19,6 +20,7 @@ def find_tty():
             iface = os.path.realpath(t + "/device")
             dev = os.path.dirname(iface)
             if (open(dev + "/idVendor").read().strip() == "0451"
+                    and open(dev + "/serial").read().strip().startswith(board.SERIAL)
                     and open(iface + "/bInterfaceNumber").read().strip() == "00"):
                 return "/dev/" + os.path.basename(t)
         except OSError:

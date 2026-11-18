@@ -20,6 +20,7 @@
 See docs/UNWEDGE.md for what this is working around.
 """
 import sys, time
+import board
 from dap import Dap, Fault, DapError
 
 PWR_AP = 4                    # IDR 0x002e0002
@@ -62,7 +63,10 @@ def wake(d):
             break
         time.sleep(0.01)
     else:
-        raise DapError("AHB-AP still faulting after FORCEACTIVE (DPREC0=%#x)" % d.ap_read(PWR_AP, DPREC0))
+        # Seen on a firmware that faults at boot and resets in a loop: catch it right after reset.
+        import catch_reset
+        catch_reset.catch(d)
+        idr = ap0_alive(d)
     print("DPREC0 %#010x -> %#010x, AHB-AP IDR %#010x: awake" % (before, d.ap_read(PWR_AP, DPREC0), idr))
 
 
@@ -144,7 +148,7 @@ def peek(d, elf, quiet=False):
     print("state     %s" % {1: "idle, waiting for an edge", 2: "awake, handling an edge", 3: "asleep, waiting for the pin to go high"}.get(state, state))
     print("chip      %s (PWR-AP DPREC0 %#010x before the read)" % (
         "deep sleep, AHB-AP power-gated" if gated else "AHB-AP reachable", before))
-    for name, n in (("PA14 S2", 14), ("PA9 UART", 9)):
+    for name, n in (("PA%d S2" % board.S2_BIT, board.S2_BIT), ("PA%d UART" % board.RX_BIT, board.RX_BIT)):
         bit = lambda v: (v >> n) & 1
         print("%-9s pin %s | RIS %d | IMASK %d | FASTWAKE %d" % (
             name, "high" if bit(g["DIN"]) else "LOW", bit(g["RIS"]), bit(g["IMASK"]), bit(g["FASTWAKE"])))
@@ -153,17 +157,21 @@ def peek(d, elf, quiet=False):
 
 
 def set_cfg(d, elf, word):
-    """Write the edge_test config word, then reset so the firmware picks it up."""
+    """Reset, then write the edge_test config word while the firmware is in its 3 s attach window.
+
+    It has to be after the reset: an MSPM0C1104 loses all RAM over NRST, and on an L1306 something
+    that runs before the firmware (the boot ROM, presumably) writes to a few words of low RAM.
+    """
     addr = elf_symbol(elf, "BTN_CFG")
-    d.connect()
-    d.ap_write(PWR_AP, DPREC0, FORCEACTIVE)
-    for _ in range(50):
-        if ap0_alive(d):
-            break
-        time.sleep(0.01)
-    d.mem_write32(addr, 0xC0F16A11)
-    d.mem_write32(addr + 4, word)
     release(d)
+    time.sleep(0.5)
+    d.connect()
+    for i in range(8):                           # eight copies: see BTN_CFG in firmware/src/lib.rs
+        d.mem_write32(addr + 8 * i, 0xC0F16A11)
+        d.mem_write32(addr + 8 * i + 4, word)
+    if d.mem_read32(addr + 4) != word:
+        raise DapError("config word did not stick")
+    d.dp_write(0x4, 0)
 
 
 def pulse_nrst(d):

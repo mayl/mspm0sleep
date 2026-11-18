@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Flash an ELF (or a raw .bin at address 0) to the LP-MSPM0L1306, coping with a
+# Flash an ELF (or a raw .bin at address 0) to the LaunchPad chosen by BOARD
+# (l1306 by default, or c1104; see tools/unwedge/board.py), coping with a
 # sleeping target, then drop every debug hold and reset so it runs untouched.
 # usage: tools/flash.sh <path-to-elf-or-bin>      (run inside `nix develop`)
 set -euo pipefail
@@ -8,7 +9,7 @@ U="$ROOT/tools/unwedge"; IMG=("$1")
 case "$1" in *.bin) IMG+=(--binary-format bin --base-address 0) ;; esac
 for _ in 1 2 3; do                                # the probe occasionally fails its first CMSIS-DAP command
   "$U/unwedge.py" wake >/dev/null
-  if probe-rs download --chip MSPM0L1306 --protocol swd "${IMG[@]}" 2>&1 | grep -q Finished; then
+  if probe-rs download --chip "$("$U/board.py" chip)" --probe "0451:bef3:$("$U/board.py" serial)" --protocol swd "${IMG[@]}" 2>&1 | grep -q Finished; then
     "$U/unwedge.py" release
     exit 0
   fi

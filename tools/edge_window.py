@@ -16,10 +16,10 @@ import os, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools", "unwedge"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-import unwedge, uart_pulse
+import board, unwedge, uart_pulse
 from edge_matrix_common import with_dap
 
-ELF = os.path.join(ROOT, "firmware/target-notimer/thumbv6m-none-eabi/release/edge_test")
+ELF = board.ELF
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 50
 NAMES = {0: "plain wait_for_falling_edge", 2: "check pin, then arm rising (wait_for_high)",
          3: "arm both edges", 4: "arm, then check pin"}

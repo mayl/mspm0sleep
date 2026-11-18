@@ -20,4 +20,4 @@ if [ "$FW" != "-" ]; then
 fi
 [ -n "${NOSWD:-}" ] || "$U/unwedge.py" release
 sleep "${SETTLE:-5}"                             # past the firmware's 3 s attach window
-"$ETRACE" capture "$CAP/$NAME.bin" --secs "$SECS" --png 2>/dev/null
+ETRACE_SERIAL="$("$U/board.py" serial)" "$ETRACE" capture "$CAP/$NAME.bin" --secs "$SECS" --png 2>/dev/null

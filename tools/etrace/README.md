@@ -44,6 +44,10 @@ that is on screen is highlighted.)
   rule with `MODE="0666"`.
 - `libusb-1.0` and `pkg-config` to build.
 
+With more than one LaunchPad plugged in, set `ETRACE_SERIAL` to the serial number
+(or its first characters) of the probe to use, for example `ETRACE_SERIAL=ML13`.
+Without it the first XDS110 found is used.
+
 ## Build and run
 
 ```bash

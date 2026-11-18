@@ -20,3 +20,4 @@ tools/energytrace/repro-cli/target/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 __pycache__/
+firmware/target-*/

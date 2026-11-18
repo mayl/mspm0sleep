@@ -6,10 +6,11 @@
 # Run inside `nix develop`. The automated matrix is tools/edge_matrix.py.
 set -euo pipefail
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-ELF="$ROOT/firmware/target-notimer/thumbv6m-none-eabi/release/edge_test"
 U="$ROOT/tools/unwedge/unwedge.py"
+B="$ROOT/tools/unwedge/board.py"
+ELF="$("$B" elf)"
 case "${1:-}" in
-  build) (cd "$ROOT/firmware" && cargo build --release --no-default-features --features lp --target-dir target-notimer)
+  build) (cd "$ROOT/firmware" && cargo build --release --no-default-features --features "$("$B" features)" --bin edge_test --target-dir "$("$B" target)")
          "$ROOT/tools/flash.sh" "$ELF" ;;
   cfg)   "$U" cfg "$ELF" "$2"; sleep 12; "$U" peek "$ELF" ;;
   read)  "$U" peek "$ELF" ;;
