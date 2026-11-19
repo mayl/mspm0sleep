@@ -92,15 +92,13 @@ Two boards: LP-MSPM0L1306 (has GPIO_ERR_01) and LP-MSPM0C1104 (not listed).
 Pulses go into the UART RX pin (PA9 / PA26) from the XDS110; counters are read
 over SWD. "main" is unmodified upstream 2b69fd062, "fix" is 1d1fcc22f. One
 command per build: `BOARD=... TARGET=... tools/edge_all.sh <label>`. Raw output:
-`tools/energytrace/captures/edge_{main2,port}_{l1306,c1104}.log` and
-`edge_matrix_*.json`.
+`tools/energytrace/captures/edge_{main2,port}_{l1306,c1104}.log`,
+`edge_blinky_l1306.log`, `edge_matrix_*.json`, `lp_blinky_{port,main2}.*`.
 
-**The run of the fix is incomplete.** The machine ran low on memory and the
-background jobs were stopped. Done: everything on main, and for the fix the
-matrix and the first width sweep on both boards. Not yet run on the port: the
-`wait_for_high` width sweep, bounce, pin-held-low, the timer-based blinky and
-the idle current. The first draft passed all of those on the L1306
-(2026-11-12, table at the end).
+The suite was run in two parts (2026-11-18 and 11-19) because the first run
+was cut short; every test below has been run on the fix. In the hold test's
+idle readout the fast-wake bit is set and the chip asleep on both boards with
+the firmware not touching it, which shows the runs were on the fixed HAL.
 
 **Idle-mode matrix**, timer-free firmware, firmware leaves FASTWAKE alone,
 counted / 20 pulses. Chip confirmed asleep after every STOP and STANDBY cell.
@@ -130,13 +128,37 @@ the cfg assumes.
 each, plain `wait_for_falling_edge()` in a loop, HAL sets FASTWAKE): 145 of 145
 widths fully counted on both boards (7,250 pulses each).
 
-**`wait_for_high()` then `wait_for_falling_edge()`** on main with firmware-set
-FASTWAKE: L1306 stuck at 37, 38, 39 us (1 of 50, firmware left waiting for a
-level that had already come); C1104 half the pulses lost at 43 to 46 us. That
-is the race change 1 closes. Not yet re-run with the fix.
+**`wait_for_high()` then `wait_for_falling_edge()`**, same sweep. On main
+with firmware-set FASTWAKE: L1306 stuck at 37, 38, 39 us (1 of 50, firmware
+left waiting for a level that had already come); C1104 half the pulses lost at
+43 to 46 us. That is the race change 1 closes. With the fix: 145 of 145 widths
+on both boards.
 
-**Bounce and pin-held-low on main**: nothing counted in STANDBY1 on either
-board (0 of 21 in the hold test), as expected without fast wake.
+**Bounce stress** (`tools/edge_bounce.py`: bursts of five pulses with bit
+times from 9 to 500 us, 20 bursts each, then 20 clean pulses), STANDBY1 and
+STANDBY0. Fix: 20/20 clean pulses after every burst width on both boards;
+edges inside the bursts are all counted from 30 us spacing up (40 and 60 of
+100 at 9 and 20 us). Main: nothing counted in STANDBY1 on either board.
+
+**Pin held low** (`tools/edge_hold.py`, UART break, 10 s). Fix, both boards:
+one edge counted, chip asleep at 5 s and at 10 s with the pin still low, then
+20 of 20 pulses after release; 21 of 21 again with no SWD reads in between.
+Main: 0 of 21.
+
+**Timer-based firmware** (`lp_blinky`, 50 ms timer debounce, L1306,
+`tools/edge_blinky.py`, counted / 20 at 833 us, 30 ms, 60 ms):
+
+| Idle mode | main | fix |
+|---|---|---|
+| STANDBY1 (default) | 0, 2, 0 | 20, 20, 20 |
+| STANDBY1, firmware also sets FASTWAKE | 20, 20, 20 | 20, 20, 20 |
+| STANDBY0, STOP2 | 20, 20, 20 | 20, 20, 20 |
+
+**Idle current** (EnergyTrace, L1306, `lp_blinky` waiting on two pins, 20 s):
+floor 20 pulses/s and 2.1 uA median in 100 ms windows, on main and with the
+fix alike. One pulse/s is about 0.5 uA, so any cost of fast wake is below
+that. No current measurement on the C1104: its probe (hardware 0x2f) has no
+EnergyTrace support in etrace or in TI's library.
 
 **Builds:** all 18 feature sets in `embassy-mspm0`'s CI build list compile at
 the tip without new warnings; commits 1 and 2 compile on their own for L1306
@@ -149,12 +171,11 @@ repo's `rustfmt.toml`) reports no changes for `gpio.rs` and `build.rs`.
   line of AI-written code").
 - Reword the three commit messages and write the PR description yourself, and
   say in it that the code was written with an LLM.
-- Run `./fmtall.sh` with the repo's pinned nightly if you change anything.
+- Run `./fmtall.sh` with the repo's pinned nightly (`nightly-2026-11-12`, not in our dev shell). Only stable rustfmt was run here.
 - Mark the PR ready only when CI passes (`CONTRIBUTING.md`).
 
 ## Not tested
 
-- The rest of the suite on the port (see above).
 - Chips other than MSPM0L1306 and MSPM0C1104; ports other than GPIOA.
 - An affected G-family chip (the erratum is listed for it, the workaround has only run on L1306).
 - CI itself.

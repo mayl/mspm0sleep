@@ -1,0 +1,47 @@
+== blinky, fix 2026-11-19T20:56:13+07:00
+STANDBY1 (default)   fastwake=off 833 us  -> 20/20
+STANDBY1 (default)   fastwake=off 30 ms   -> 20/20
+STANDBY1 (default)   fastwake=off 60 ms   -> 20/20
+STANDBY1 (default)   fastwake=on  833 us  -> 20/20
+STANDBY1 (default)   fastwake=on  30 ms   -> 20/20
+STANDBY1 (default)   fastwake=on  60 ms   -> 20/20
+STANDBY0             fastwake=off 833 us  -> 20/20
+STANDBY0             fastwake=off 30 ms   -> 20/20
+STANDBY0             fastwake=off 60 ms   -> 20/20
+STOP2                fastwake=off 833 us  -> 20/20
+STOP2                fastwake=off 30 ms   -> 20/20
+STOP2                fastwake=off 60 ms   -> 20/20
+
+| Idle mode | FASTWAKE | 833 us | 30 ms | 60 ms |
+|---|---|---|---|---|
+| STANDBY1 (default) | off | 20/20 | 20/20 | 20/20 |
+| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | off | 20/20 | 20/20 | 20/20 |
+| STOP2 | off | 20/20 | 20/20 | 20/20 |
+== blinky, main
+STANDBY1 (default)   fastwake=off 833 us  -> 0/20
+STANDBY1 (default)   fastwake=off 30 ms   -> 2/20
+STANDBY1 (default)   fastwake=off 60 ms   -> 0/20
+STANDBY1 (default)   fastwake=on  833 us  -> 20/20
+STANDBY1 (default)   fastwake=on  30 ms   -> 20/20
+STANDBY1 (default)   fastwake=on  60 ms   -> 20/20
+STANDBY0             fastwake=off 833 us  -> 20/20
+STANDBY0             fastwake=off 30 ms   -> 20/20
+STANDBY0             fastwake=off 60 ms   -> 20/20
+STOP2                fastwake=off 833 us  -> 20/20
+STOP2                fastwake=off 30 ms   -> 20/20
+STOP2                fastwake=off 60 ms   -> 20/20
+
+| Idle mode | FASTWAKE | 833 us | 30 ms | 60 ms |
+|---|---|---|---|---|
+| STANDBY1 (default) | off | 0/20 | 2/20 | 0/20 |
+| STANDBY1 (default) | on | 20/20 | 20/20 | 20/20 |
+| STANDBY0 | off | 20/20 | 20/20 | 20/20 |
+| STOP2 | off | 20/20 | 20/20 | 20/20 |
+== idle current, lp_blinky, fix
+released and reset
+/home/larry/projects/claude/mspm0sleep/tools/energytrace/captures/lp_blinky_port.bin: 20.0 s  mean 215 µA  |  100 ms windows: min 2.1 µA  p10 2.1 µA  median 2.1 µA  max 3.235 mA  (step 4.9 µA)  |  floor 20 pulses/s  |  14223.4 µJ
+== idle current, lp_blinky, main
+released and reset
+/home/larry/projects/claude/mspm0sleep/tools/energytrace/captures/lp_blinky_main2.bin: 20.7 s  mean 203 µA  |  100 ms windows: min 0.00 µA  p10 2.1 µA  median 2.1 µA  max 4.154 mA  (step 4.9 µA)  |  floor 20 pulses/s  |  13878.0 µJ
+== done 2026-11-19T21:07:19+07:00

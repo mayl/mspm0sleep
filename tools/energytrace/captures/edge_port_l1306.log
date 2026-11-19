@@ -97,3 +97,45 @@ STANDBY1 (default)   fastwake=1  30 ms, re-sleep while low  -> 20/20   (AHB-AP g
 == width sweep (firmware sets FASTWAKE: 0)
 released and reset
 plain wait_for_falling_edge                   145 widths x 50 pulses: 145 widths fully counted
+== port_l1306 resumed: board l1306, /home/larry/projects/claude/mspm0sleep/firmware/target-notimer/thumbv6m-none-eabi/release/edge_test, 2026-11-19T20:49:45+07:00
+released and reset
+== width sweep, wait_for_high pattern (firmware sets FASTWAKE: 0)
+released and reset
+check pin, then arm rising (wait_for_high)    145 widths x 50 pulses: 145 widths fully counted
+== bounce
+released and reset
+STANDBY1  bursts of 5 x   9 us:  40 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x  20 us:  60 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x  30 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x  45 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x  60 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x  75 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x  90 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x 120 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x 200 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY1  bursts of 5 x 500 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+released and reset
+STANDBY0  bursts of 5 x   9 us:  40 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  20 us:  60 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  30 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  45 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  60 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  75 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x  90 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x 120 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x 200 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+STANDBY0  bursts of 5 x 500 us: 100 of 100 burst edges counted; then 20/20 clean pulses
+== hold
+released and reset
+idle, pin high                     count  0  PA9 high  RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+pin held low for 5 s               count  1  PA9 LOW   RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+pin held low for 10 s              count  1  PA9 LOW   RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+released                           count  1  PA9 high  RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+after 20 more pulses               count 21  PA9 high  RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+counted 21 edges in total; expected 21 (one for the hold, 20 after it)
+== hold, no reads in between
+released and reset
+idle, pin high                     count  0  PA9 high  RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+after 20 more pulses               count 21  PA9 high  RIS 0 IMASK 1 FASTWAKE 1  asleep (AHB-AP power-gated)
+counted 21 edges in total; expected 21 (one for the hold, 20 after it)
+== done 2026-11-19T20:56:13+07:00

@@ -1,0 +1,18 @@
+{
+  "calibration": {
+    "na_per_pps": 489.61489161605255,
+    "x0_pps": 15.70783428234832
+  },
+  "sample_rate": 10000,
+  "probe_hardware": 40,
+  "probe_firmware": 50331682,
+  "started_unix": 1795097217,
+  "cal_loaded": [
+    3136,
+    10184
+  ],
+  "cal_open": [
+    16,
+    10186
+  ]
+}

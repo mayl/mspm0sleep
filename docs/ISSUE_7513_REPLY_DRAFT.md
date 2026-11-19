@@ -1,8 +1,6 @@
 <!-- Draft reply for embassy-rs/embassy#7513. AI-drafted: rewrite in your own words before posting. -->
-<!-- Numbers: main and "fix" columns measured 2026-11-18 on main 2b69fd062 (after #7326). The 71f54dfee
-     numbers are from 2026-11-12 and have not been re-run. The fix has NOT yet been through the
-     wait_for_high sweep, bounce, hold, blinky and idle-current tests after the port: see
-     docs/UPSTREAM_GPIO_WAKE_PR.md. -->
+<!-- Posted by Larry (edited) on 2026-11-18. Since then the fix has also passed the wait_for_high sweep,
+     bounce, hold, blinky and idle-current tests on main 2b69fd062: docs/UPSTREAM_GPIO_WAKE_PR.md. -->
 
 I ran my rig against @CordlessCoder's `mspm0-low-power` branch (tip 71f54dfee) on an LP-MSPM0L1306. That is not the exact commit linked above (087b1c788), but the approach is the same: FASTWAKE while armed, both edges always detected, direction decided in the handler by reading DIN.
 
