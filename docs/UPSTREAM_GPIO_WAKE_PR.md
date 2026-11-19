@@ -55,10 +55,16 @@ All in `Flex<'d, Async>`; `Input` and `OutputOpenDrain` delegate to it.
   `wait_inner` returns `impl Future` and arms when called. The loop arms on
   first poll. Callers only ever `.await` it at once, so it should not matter,
   but it is a difference between the two cfgs.
-- **Family list.** Copied from the errata metadata on CordlessCoder's branch
-  (`METADATA.has_erratum`), which upstream's pinned metapac does not have. Only
-  the L110x/L13xx sheet (SLAZ741E) was read here; check the G sheets. The
-  C1104 measurements below agree with it not being listed.
+- **Family list.** First copied from the errata metadata on CordlessCoder's
+  branch, then checked against TI's errata sheets (2026-11-19, latest
+  revisions). GPIO_ERR_01 ("GPIO wakeup edges can be lost in STANDBY mode") is
+  listed in SLAZ741E (L110x, L13xx; Rev C, D) and SLAZ742H (G3x0x, G1x0x;
+  Rev B, C, D), and in none of: SLAZ753D (C1103/C1104, MSPS003), SLAZ761C
+  (C1105/C1106), SLAZ755D (L122x, L222x), SLAZ758E (G151x, G351x), SLVSJM6A
+  (G511x, G5187), SLAZ763B (H321x), SLAZ766A (L112x, L211x). L134x is covered
+  by the "L13xx" title only; its product page links SLAZ741E. No other sheet
+  has a lost-wake-edge erratum under another number. The C1104 measurements
+  below agree.
 - **Two `#[cfg]` functions rather than `if !cfg!(gpio_err_01) { return }`.**
   The `if` form was tried on the first draft and made every chip 100 to 270
   bytes larger: the second await stays in the future.
@@ -150,7 +156,7 @@ repo's `rustfmt.toml`) reports no changes for `gpio.rs` and `build.rs`.
 
 - The rest of the suite on the port (see above).
 - Chips other than MSPM0L1306 and MSPM0C1104; ports other than GPIOA.
-- An affected G-family chip.
+- An affected G-family chip (the erratum is listed for it, the workaround has only run on L1306).
 - CI itself.
 
 ## The fix the maintainers pointed to (tested 2026-11-12)
