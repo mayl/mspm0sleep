@@ -172,7 +172,7 @@ That has consequences worth knowing:
 
 A capture is two files:
 
-- `run.bin`: the bytes the probe sent, unmodified. Format in `src/decode.rs`.
+- `run.bin`: the bytes the probe sent, unmodified. Format in `crates/energytrace/src/decode.rs`.
 - `run.json`: calibration, sample rate, probe versions and start time.
 
 Captures without a `.json` (older ones in `tools/energytrace/captures/`) are
@@ -180,21 +180,40 @@ read with a nominal calibration, or with `--cal NA_PER_PPS,X0_PPS`.
 
 ## As a library
 
-The crate is also a library: `etrace::probe::Session` (open, calibrate, start,
-read, stop), `etrace::decode::Decoder` (bytes to events), `etrace::trace::Trace`
-(pulses on a millisecond grid, statistics), `etrace::scope::Scope` (the display),
-`etrace::dap::Dap` (DP, AP and memory access over SWD) and `etrace::sleep`
-(wake, release, flash).
+This directory is a cargo workspace. The tool is built on two library crates
+that other programs can use; neither prints anything, and both return typed
+errors.
+
+| Crate | What it has | Depends on |
+|---|---|---|
+| `crates/xds110-sleep` | Probe discovery and selection, a CMSIS-DAP client behind a `Transport` trait, and `status`, `wake`, `release`, `reset`, `catch`, `dump`, `watch` | std only |
+| `crates/energytrace` | Stream decoder, calibration and sidecar file, pulse trace with statistics, and `Source`: decoded events from a probe (`Session`) or from a saved capture (`Capture`) | `serde`, `serde_json`; `rusb` with the default feature `usb` |
+| `etrace` (this directory) | The command-line tool: oscilloscope, plots, board names, flashing through probe-rs | both, and `clap`, `ratatui`, `plotters`, `ctrlc` |
+
+From another repository, as a git dependency (cargo finds the crates by name):
+
+```toml
+xds110-sleep = { git = "<this repository>", rev = "<commit>" }
+energytrace = { git = "<this repository>", rev = "<commit>", default-features = false }  # no libusb: replay only
+```
+
+Cargo also clones this repository's submodule (the embassy fork) when it
+fetches such a dependency; it is not built. Each crate's own documentation
+(`cargo doc --workspace --no-deps --open`) has examples and says what it
+writes to the chip.
 
 ## Tests
 
 ```bash
-cargo test
+cargo test --workspace
 ```
 
 Unit tests cover the decoder, the trace store and the display (rendered to an
-off-screen buffer). `tests/captures.rs` runs the decoder over captures recorded
-from a real board, including a deep-sleep one and one with a damaged stream.
+off-screen buffer). `crates/energytrace/tests/captures.rs` runs the decoder
+over captures recorded from a real board, including a deep-sleep one and one
+with a damaged stream. `crates/xds110-sleep/src/sim.rs` runs the sleep
+operations against a simulated chip and checks the exact reports sent, and
+that no memory address other than the core's debug registers is ever written.
 
 ## Where the protocol comes from
 

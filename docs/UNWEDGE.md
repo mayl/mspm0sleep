@@ -74,7 +74,7 @@ chip awake, which would invalidate any current measurement taken afterwards.
 `etrace measure` does the whole flash / release / capture sequence
 (`tools/measure.sh` adds this bench's hub power cycle and paths).
 
-These commands are a small CMSIS-DAP v1 client over hidraw (`src/dap.rs`), so
+These commands are a small CMSIS-DAP v1 client over hidraw (the `xds110-sleep` crate, `tools/etrace/crates/xds110-sleep`), so
 they need the XDS110 hidraw node to be writable (udev rule for `0451:bef3`).
 `tools/unwedge/unwedge.py` is the Python original; the edge_test scripts
 (`tools/edge_*.py`) still use it for their counter readout.
