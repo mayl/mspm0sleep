@@ -58,15 +58,25 @@
 //!
 //! # Together with a debugger
 //!
-//! Not tested on hardware. From how the two use the probe, expect it not to
-//! work: [`Session::open`] claims the probe's vendor interface 2, which is
-//! also its CMSIS-DAP v2 interface (the one probe-rs uses), and sends
-//! `DAP_Disconnect` on it because a debugger that leaves the probe
-//! "connected" makes it ignore EnergyTrace commands. So a session should fail
-//! with [`Error::Busy`] while a debugger has the probe, and would cut the
-//! debugger off if it got through. A debugger attached to the chip also keeps
-//! it awake, which defeats a sleep-current measurement in any case. Measure
-//! with the debugger detached and the chip released.
+//! Tested on an LP-MSPM0L1306 (probe firmware 3.0.0.34) with probe-rs 0.32
+//! and with the `xds110-sleep` crate, which both reach the probe through its
+//! CMSIS-DAP HID interface. The EnergyTrace interfaces are separate USB
+//! interfaces, so both can be open at once, but the order matters:
+//!
+//! - **Open the session first, then attach the debugger: works.** probe-rs
+//!   attached and read memory while a capture was streaming, and the capture
+//!   was complete.
+//! - **Opening a session while a debugger is attached cuts the debugger
+//!   off.** [`Session::open`] sends `DAP_Disconnect`, because a debugger that
+//!   has left the probe "connected" makes it ignore EnergyTrace commands.
+//!   The session itself opens, calibrates and streams, but SWD transfers on
+//!   the connection that existed before fail from then on (no acknowledge)
+//!   until the debugger connects again.
+//!
+//! What a capture shows with a debugger attached is another matter: the
+//! debug holds keep the chip awake (about 1.1 mA on that board where the
+//! released firmware idles at 2 uA), so sleep current cannot be measured
+//! that way. Activity above that level is still visible.
 //!
 //! Protocol details were worked out from TI's libraries; see
 //! `tools/energytrace/THEIA_VERIFICATION.md` in the repository this crate lives in.
