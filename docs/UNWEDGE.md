@@ -1,6 +1,6 @@
 # The "wedged" LP-MSPM0L1306: what it was and how to get out of it
 
-Investigated 2026-11-11 (bead mspm0sleep-8g0). Tooling: `tools/unwedge/`.
+Investigated 2026-11-11 (bead mspm0sleep-8g0). Tooling: the sleep commands of `etrace` (`tools/etrace`), ported from `tools/unwedge/unwedge.py` on 2026-11-21.
 
 ## Summary
 
@@ -61,23 +61,29 @@ disconnect it clears bit 3 so the chip can sleep again.
 
 ## Recovery recipe
 
-    tools/unwedge/unwedge.py status     # read-only; says whether the AHB-AP is gated
-    tools/unwedge/unwedge.py wake       # PWR-AP FORCEACTIVE; survives the tool exiting
+    etrace status     # read-only; says whether the AHB-AP is gated
+    etrace wake       # PWR-AP FORCEACTIVE; survives the tool exiting
     probe-rs download --chip MSPM0L1306 --protocol swd <elf>
-    tools/unwedge/unwedge.py release    # un-halt, clear FORCEACTIVE + power-up request, NRST
+    etrace release    # un-halt, clear FORCEACTIVE + power-up request, NRST
+
+(`etrace` is `tools/etrace/target/release/etrace`, or `nix run .#etrace --`.
+`etrace flash <elf>` does the three steps after `status` in one go.)
 
 `release` matters: FORCEACTIVE and a pending debug power-up request keep the
 chip awake, which would invalidate any current measurement taken afterwards.
-`tools/measure.sh` wraps the whole flash / release / capture sequence.
+`etrace measure` does the whole flash / release / capture sequence
+(`tools/measure.sh` adds this bench's hub power cycle and paths).
 
-`unwedge.py` is a ~150-line CMSIS-DAP v1 client over hidraw (stdlib only), so
-it needs the XDS110 hidraw node to be writable (udev rule for `0451:bef3`).
+These commands are a small CMSIS-DAP v1 client over hidraw (`src/dap.rs`), so
+they need the XDS110 hidraw node to be writable (udev rule for `0451:bef3`).
+`tools/unwedge/unwedge.py` is the Python original; the edge_test scripts
+(`tools/edge_*.py`) still use it for their counter readout.
 
 Other ways in, in order of escalation:
 
 1. **Attach inside the window after reset.** The ROM BSL stays awake 10 s;
    every firmware in `firmware/` spins for 3 s at boot (`attach_window()`) for
-   the same reason. `unwedge.py reset` pulses NRST from the probe.
+   the same reason. `etrace reset` pulses NRST from the probe.
 2. **PWR-AP FORCEACTIVE** (above). Works from any STOP/STANDBY state seen so far.
 3. **DSSM mailbox via SEC-AP** (mass erase `0x020C`, factory reset `0x020A`),
    which is what CCS offers when connect fails. Sequence is in

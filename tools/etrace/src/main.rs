@@ -8,23 +8,48 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 
+use etrace::board::{self, Probe};
 use etrace::cal::{Calibration, Meta};
+use etrace::dap::Dap;
 use etrace::decode::Decoder;
 use etrace::probe::Session;
 use etrace::scope::{Feed, Scope};
 use etrace::trace::Trace;
-use etrace::{plot, Error, Result};
+use etrace::{plot, sleep, Error, Result};
 
-/// EnergyTrace current measurement with a TI XDS110 probe.
+/// EnergyTrace current measurement with a TI XDS110 probe, and debug access
+/// to MSPM0 chips that are asleep.
 ///
 /// The probe on a LaunchPad powers the target and counts the charge it
 /// delivers. This tool reads that count: live as a terminal oscilloscope, or
 /// headless into a capture file with statistics.
+///
+/// A sleeping MSPM0 does not answer a debugger, and a chip that a debugger
+/// has touched does not sleep. `wake`, `release` and `flash` deal with both;
+/// `measure` goes from an image to a current measurement in one step.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    #[command(flatten)]
+    select: SelectArgs,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Args)]
+struct SelectArgs {
+    /// LaunchPad to use when several are plugged in: l1306 or c1104
+    #[arg(long, global = true, env = "BOARD", value_name = "NAME")]
+    board: Option<String>,
+    /// Probe to use, by serial number or its first characters (wins over --board)
+    #[arg(long, global = true, env = "ETRACE_SERIAL", value_name = "SERIAL")]
+    serial: Option<String>,
+}
+
+impl SelectArgs {
+    fn probe(&self) -> Result<Probe> {
+        board::select(self.board.as_deref(), self.serial.as_deref())
+    }
 }
 
 #[derive(Subcommand)]
@@ -41,6 +66,93 @@ enum Command {
     Export(ExportArgs),
     /// Run the probe's calibration and print the result
     Cal(ProbeArgs),
+    /// Flash an image if given, let the chip go, and record its current
+    Measure(MeasureArgs),
+    /// Write an image to flash, also when the chip is asleep, then let it run
+    Flash(FlashArgs),
+    /// Show the debug port and whether the chip is asleep (changes nothing)
+    Status(DapArgs),
+    /// Force a sleeping chip awake so that a debugger can attach
+    Wake(DapArgs),
+    /// Undo `wake` and any debugger hold, then reset: do this before measuring
+    Release(DapArgs),
+    /// Pulse NRST
+    Reset(DapArgs),
+    /// Wake and halt the chip; print where it is and its sleep configuration
+    Dump(DapArgs),
+    /// Reset, then report how long the chip stays reachable
+    Watch(WatchArgs),
+    /// Halt a chip that crashes at boot, right after reset
+    Catch(CatchArgs),
+    /// List the XDS110 probes that are plugged in
+    Probes,
+}
+
+#[derive(Args)]
+struct DapArgs {
+    /// Print every SWD transfer
+    #[arg(long)]
+    verbose: bool,
+}
+
+#[derive(Args)]
+struct WatchArgs {
+    /// How long to watch, in seconds
+    #[arg(default_value_t = 20.0)]
+    secs: f64,
+    #[command(flatten)]
+    dap: DapArgs,
+}
+
+#[derive(Args)]
+struct CatchArgs {
+    /// Then run on for up to 6 s and print the registers at a HardFault
+    #[arg(long)]
+    trace: bool,
+    #[command(flatten)]
+    dap: DapArgs,
+}
+
+#[derive(Args)]
+struct FlashArgs {
+    /// ELF file, or a raw binary for address 0 if the name ends in .bin
+    image: PathBuf,
+    /// Chip name for probe-rs, if the board is not one this tool knows
+    #[arg(long)]
+    chip: Option<String>,
+    #[command(flatten)]
+    dap: DapArgs,
+}
+
+#[derive(Args)]
+struct MeasureArgs {
+    /// Raw capture to write; calibration goes next to it as <FILE>.json
+    file: PathBuf,
+    /// Image to flash first (default: measure what is on the chip)
+    #[arg(long, value_name = "IMAGE")]
+    flash: Option<PathBuf>,
+    /// Chip name for probe-rs, if the board is not one this tool knows
+    #[arg(long)]
+    chip: Option<String>,
+    /// Length of the capture, in seconds
+    #[arg(long, default_value_t = 10.0)]
+    secs: f64,
+    /// Wait this long after the reset before measuring, in seconds
+    #[arg(long, default_value_t = 5.0)]
+    settle: f64,
+    /// Do not touch SWD or NRST (for a board with its debug jumpers pulled)
+    #[arg(long, conflicts_with = "flash")]
+    no_swd: bool,
+    #[command(flatten)]
+    probe: ProbeArgs,
+    #[command(flatten)]
+    out: OutputArgs,
+    /// Also write a PNG next to the capture
+    #[arg(long)]
+    png: bool,
+    /// Also write an SVG next to the capture
+    #[arg(long)]
+    svg: bool,
 }
 
 #[derive(Args)]
@@ -257,9 +369,9 @@ const CAPTURE_RATE: u32 = 10_000;
 /// fills packets sooner: the longest wait for new data drops from about 1.5 s to about 0.7 s.
 const LIVE_RATE: u32 = 50_000;
 
-fn open_session(args: &ProbeArgs, default_rate: u32) -> Result<Session> {
+fn open_session(probe: &Probe, args: &ProbeArgs, default_rate: u32) -> Result<Session> {
     eprintln!("calibrating...");
-    let session = Session::open(args.rate.unwrap_or(default_rate), args.verbose)?;
+    let session = Session::open(probe, args.rate.unwrap_or(default_rate), args.verbose)?;
     eprintln!(
         "XDS110 hardware {:#04x}, firmware {}; {}",
         session.info.hardware,
@@ -287,9 +399,9 @@ fn pump(session: &mut Session, stop: &AtomicBool, mut sink: impl FnMut(&[u8]) ->
     sink(&tail?)
 }
 
-fn capture(args: CaptureArgs) -> Result<()> {
+fn capture(probe: &Probe, args: CaptureArgs) -> Result<()> {
     let stop = interrupt_flag();
-    let mut session = open_session(&args.probe, CAPTURE_RATE)?;
+    let mut session = open_session(probe, &args.probe, CAPTURE_RATE)?;
     let mut file = File::create(&args.file).map_err(|e| format!("{}: {e}", args.file.display()))?;
     session.meta().save(&args.file)?;
 
@@ -357,7 +469,7 @@ fn replay(raw: Vec<u8>, speed: f64, tx: Sender<Feed>, stop: Arc<AtomicBool>) {
     let _ = tx.send(Feed::End(Ok(())));
 }
 
-fn live(args: LiveArgs) -> Result<()> {
+fn live(select: &SelectArgs, args: LiveArgs) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
 
@@ -372,7 +484,7 @@ fn live(args: LiveArgs) -> Result<()> {
         let (speed, flag) = (args.speed, stop.clone());
         (scope, std::thread::spawn(move || replay(capture.raw, speed, tx, flag)))
     } else {
-        let mut session = open_session(&args.probe, LIVE_RATE)?;
+        let mut session = open_session(&select.probe()?, &args.probe, LIVE_RATE)?;
         let mut file = match &args.save {
             Some(path) => {
                 session.meta().save(path)?;
@@ -470,8 +582,8 @@ fn export(args: ExportArgs) -> Result<()> {
     Ok(())
 }
 
-fn cal(args: ProbeArgs) -> Result<()> {
-    let session = Session::open(args.rate.unwrap_or(CAPTURE_RATE), args.verbose)?;
+fn cal(probe: &Probe, args: ProbeArgs) -> Result<()> {
+    let session = Session::open(probe, args.rate.unwrap_or(CAPTURE_RATE), args.verbose)?;
     println!("probe hardware   {:#06x}", session.info.hardware);
     println!("probe firmware   {}", session.info.firmware_string());
     println!(
@@ -491,14 +603,76 @@ fn cal(args: ProbeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Chip name for probe-rs: the one given, or the one on the board the probe belongs to.
+fn chip_name(probe: &Probe, given: Option<String>) -> Result<String> {
+    given.or(probe.board.map(|b| b.chip.to_string())).ok_or_else(|| {
+        Error(format!(
+            "the probe's serial number ({}) does not name a board this tool knows: give --chip or --board",
+            probe.serial
+        ))
+    })
+}
+
+fn measure(probe: &Probe, args: MeasureArgs) -> Result<()> {
+    if let Some(image) = &args.flash {
+        let chip = chip_name(probe, args.chip)?;
+        eprintln!("flashing {}...", image.display());
+        sleep::flash(probe, &chip, image, args.probe.verbose)?;
+    } else if !args.no_swd {
+        sleep::release(&mut Dap::open(probe, args.probe.verbose)?)?;
+    }
+    // Every firmware here stays awake for a few seconds after reset so that a debugger can attach.
+    std::thread::sleep(Duration::from_secs_f64(args.settle));
+    capture(
+        probe,
+        CaptureArgs {
+            file: args.file,
+            secs: Some(args.secs),
+            probe: args.probe,
+            out: args.out,
+            png: args.png,
+            svg: args.svg,
+        },
+    )
+}
+
+fn probes() -> Result<()> {
+    let all = board::probes();
+    if all.is_empty() {
+        return Err("no XDS110 probe found on USB".into());
+    }
+    for p in all {
+        match p.board {
+            Some(b) => println!("{}  {}  ({})", p.serial, b.name, b.chip),
+            None => println!("{}  unknown board", p.serial),
+        }
+    }
+    Ok(())
+}
+
 fn main() {
-    let result = match Cli::parse().command {
-        Command::Live(a) => live(a),
+    let Cli { select, command } = Cli::parse();
+    let dap = |args: &DapArgs| -> Result<Dap> { Ok(Dap::open(&select.probe()?, args.verbose)?) };
+    let result = match command {
+        Command::Live(a) => live(&select, a),
         Command::View(a) => view(a),
-        Command::Capture(a) => capture(a),
+        Command::Capture(a) => select.probe().and_then(|p| capture(&p, a)),
         Command::Stats(a) => stats(a),
         Command::Export(a) => export(a),
-        Command::Cal(a) => cal(a),
+        Command::Cal(a) => select.probe().and_then(|p| cal(&p, a)),
+        Command::Measure(a) => select.probe().and_then(|p| measure(&p, a)),
+        Command::Flash(a) => select.probe().and_then(|p| {
+            let chip = chip_name(&p, a.chip)?;
+            sleep::flash(&p, &chip, &a.image, a.dap.verbose)
+        }),
+        Command::Status(a) => dap(&a).and_then(|mut d| sleep::status(&mut d)),
+        Command::Wake(a) => dap(&a).and_then(|mut d| sleep::wake(&mut d)),
+        Command::Release(a) => dap(&a).and_then(|mut d| sleep::release(&mut d)),
+        Command::Reset(a) => dap(&a).and_then(|mut d| sleep::reset(&mut d)),
+        Command::Dump(a) => dap(&a).and_then(|mut d| sleep::dump(&mut d)),
+        Command::Watch(a) => dap(&a.dap).and_then(|mut d| sleep::watch(&mut d, a.secs)),
+        Command::Catch(a) => dap(&a.dap).and_then(|mut d| sleep::catch_report(&mut d, a.trace)),
+        Command::Probes => probes(),
     };
     if let Err(e) = result {
         eprintln!("etrace: {e}");

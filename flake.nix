@@ -43,8 +43,10 @@
               version = "0.1.0";
               src = ./tools/etrace;
               cargoLock.lockFile = ./tools/etrace/Cargo.lock;
-              nativeBuildInputs = [ pkgs.pkg-config ];
+              nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
               buildInputs = [ pkgs.libusb1 ];
+              # `etrace flash` runs probe-rs; one already on the PATH wins.
+              postInstall = "wrapProgram $out/bin/etrace --suffix PATH : ${pkgs.probe-rs-tools}/bin";
               # The integration tests read captures that live outside this source tree.
               doCheck = false;
               meta.mainProgram = "etrace";

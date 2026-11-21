@@ -6,21 +6,27 @@
 //! Current is the pulse rate, scaled by a two-point calibration the probe runs
 //! against a built-in reference load.
 //!
+//! - [`board`]: which probe, and so which LaunchPad, to talk to.
 //! - [`probe`]: USB transport and the EnergyTrace command sequence.
 //! - [`decode`]: the record stream the probe sends while measuring.
 //! - [`cal`]: calibration and the sidecar file saved next to a capture.
 //! - [`trace`]: pulses on a millisecond grid, with statistics and resampling.
 //! - [`plot`]: PNG, SVG and CSV output.
 //! - [`scope`]: the terminal oscilloscope.
+//! - [`dap`]: raw SWD access through the probe's CMSIS-DAP interface.
+//! - [`sleep`]: waking a sleeping MSPM0 for a debugger and handing it back; flashing.
 //!
 //! Protocol details were worked out from TI's libraries; see
 //! `tools/energytrace/THEIA_VERIFICATION.md` in this repository.
 
+pub mod board;
 pub mod cal;
+pub mod dap;
 pub mod decode;
 pub mod plot;
 pub mod probe;
 pub mod scope;
+pub mod sleep;
 pub mod trace;
 
 /// Error with a message meant for the person at the terminal.

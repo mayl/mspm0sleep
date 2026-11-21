@@ -44,9 +44,14 @@ that is on screen is highlighted.)
   rule with `MODE="0666"`.
 - `libusb-1.0` and `pkg-config` to build.
 
-With more than one LaunchPad plugged in, set `ETRACE_SERIAL` to the serial number
-(or its first characters) of the probe to use, for example `ETRACE_SERIAL=ML13`.
-Without it the first XDS110 found is used.
+With more than one LaunchPad plugged in, say which one: `--board l1306` (or the
+environment variable `BOARD`) for a board the tool knows by name, or `--serial
+ML13` (`ETRACE_SERIAL`) with the serial number of its probe or the first
+characters of it. `etrace probes` lists what is plugged in.
+
+The sleep commands below use the probe's CMSIS-DAP interface through
+`/dev/hidraw*` (Linux only), which needs its own udev rule, and `flash` and
+`measure --flash` run `probe-rs`, which must be on the PATH.
 
 ## Build and run
 
@@ -69,6 +74,22 @@ cd tools/etrace && cargo build --release
 | `etrace stats a.bin b.bin` | Statistics for saved captures. `--json` for scripts. |
 | `etrace export run.bin --csv out.csv` | CSV, SVG or PNG from a capture. `--bin-ms` sets the time resolution. |
 | `etrace cal` | Run the probe's calibration and print it. |
+
+An MSPM0 in STOP or STANDBY does not answer a debugger, and one that a debugger
+has touched stays awake. These commands handle both (background in
+`docs/UNWEDGE.md`):
+
+| Command | What it does |
+|---|---|
+| `etrace measure run.bin --flash fw.elf --secs 20` | Flash, drop the debug holds, reset, wait `--settle` seconds (5), capture. Without `--flash` it measures what is on the chip; `--no-swd` leaves SWD and NRST alone. |
+| `etrace flash fw.elf` | Wake the chip, write the image with probe-rs, then `release`. A name ending in `.bin` is a raw binary for address 0. |
+| `etrace status` | Debug port, access ports, and whether the chip is asleep. Changes nothing. |
+| `etrace wake` | Force the chip active (PWR-AP FORCEACTIVE) so that a debugger can attach. The hold stays until `release`. |
+| `etrace release` | Resume the core, drop FORCEACTIVE and the debug power-up request, pulse NRST. Needed before any current measurement. |
+| `etrace reset` | Pulse NRST only. |
+| `etrace dump` | Wake and halt; print PC, the sleep configuration and whether flash is blank. |
+| `etrace watch 20` | Pulse NRST, then report how long the chip stays reachable. |
+| `etrace catch` | Halt a chip that crashes and resets in a loop, right after reset. `--trace` runs on to the HardFault. |
 
 `etrace view` and `etrace live` take `--span SECONDS` and `--log` to set the
 starting view, and `--dump 120x30` to print one frame as text instead of
@@ -136,7 +157,7 @@ That has consequences worth knowing:
   microcontroller. On the LP-MSPM0L1306 the thermistor divider (jumper J15)
   alone draws 165 µA.
 - **A debugger connection keeps the chip awake.** After flashing, release the
-  debug hold (in this repository: `tools/unwedge/unwedge.py release`) or
+  debug hold (`etrace release`; `etrace measure` does it for you) or
   power-cycle the board before trusting low readings.
 
 ## If it does not work
@@ -161,7 +182,9 @@ read with a nominal calibration, or with `--cal NA_PER_PPS,X0_PPS`.
 
 The crate is also a library: `etrace::probe::Session` (open, calibrate, start,
 read, stop), `etrace::decode::Decoder` (bytes to events), `etrace::trace::Trace`
-(pulses on a millisecond grid, statistics), `etrace::scope::Scope` (the display).
+(pulses on a millisecond grid, statistics), `etrace::scope::Scope` (the display),
+`etrace::dap::Dap` (DP, AP and memory access over SWD) and `etrace::sleep`
+(wake, release, flash).
 
 ## Tests
 

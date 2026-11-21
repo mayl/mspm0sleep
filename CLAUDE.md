@@ -68,6 +68,9 @@ BOARD=c1104 TARGET=target-c1104 nix develop .# --command tools/edge_all.sh my_la
 
 # flash + release debug holds + EnergyTrace capture + statistics
 nix develop .# --command tools/measure.sh lp_idle my_capture 20
+# the same without the wrapper, and the sleep commands (status, wake, release, reset, dump, watch, catch, flash)
+nix develop .# --command tools/etrace/target/release/etrace --board l1306 measure my.bin --flash firmware/target/thumbv6m-none-eabi/release/lp_idle --secs 20
+tools/etrace/target/release/etrace --board c1104 status
 
 # EnergyTrace utility: build + test, live scope, look at a capture without a terminal
 nix develop .# --command bash -c 'cd tools/etrace && cargo build --release && cargo test --release'
@@ -75,17 +78,17 @@ nix run .#etrace -- live                      # interactive; needs a real termin
 tools/etrace/target/release/etrace view tools/energytrace/captures/lp_blinky_gpiofix.bin --dump 120x30
 ```
 
-With two LaunchPads plugged in, every tool takes `BOARD=l1306|c1104` (probe chosen by serial, `tools/unwedge/board.py`); etrace takes `ETRACE_SERIAL`. Never run two test scripts against the same board at once: they corrupt each other's probe traffic. A chip that boot-loops can be halted with `tools/unwedge/catch_reset.py`.
+With two LaunchPads plugged in, every tool takes `BOARD=l1306|c1104` (probe chosen by serial; the scripts default to l1306, etrace itself refuses to guess). etrace also takes `--board`, or `--serial`/`ETRACE_SERIAL`. Never run two test scripts against the same board at once: they corrupt each other's probe traffic. A chip that boot-loops can be halted with `etrace catch`.
 
-Do NOT flash with a bare `probe-rs run/download` when the target is asleep: probe-rs 0.32 cannot attach to an MSPM0 in STOP/STANDBY. Use `tools/unwedge/unwedge.py wake` first and `release` afterwards (see `docs/UNWEDGE.md`).
+Do NOT flash with a bare `probe-rs run/download` when the target is asleep: probe-rs 0.32 cannot attach to an MSPM0 in STOP/STANDBY. Use `tools/flash.sh` (`etrace flash`), or `etrace wake` first and `etrace release` afterwards (see `docs/UNWEDGE.md`).
 
 ## Architecture Overview
 
 - `embassy/` — submodule, **unmodified upstream** embassy (branch `mspm0l_lowpower` on the fork tracks `embassy-rs/embassy` main). Upstream provides MSPM0 deep sleep via `embassy_mspm0::executor::Executor` + the `low-power` feature; our own earlier sleep work was dropped in favour of it.
 - `firmware/` — measurement firmwares for LP-MSPM0L1306 (`lp_idle`, `lp_blinky`, `busy`); `edge_test` also builds for LP-MSPM0C1104 (`--no-default-features --features lp,c1104`). A board feature (`l1306`, in the defaults, or `c1104`) is always required. Never add a `memory.x` to the crate root: the linker would use it instead of the per-board `memory-*.x`.
-- `tools/etrace` — the EnergyTrace utility (Rust lib + CLI): live terminal scope, headless capture, statistics, export. `tools/measure.sh` uses it. See its README.
+- `tools/etrace` — the one binary for EnergyTrace and sleep management (Rust lib + CLI): live terminal scope, headless capture, statistics, export; and over the probe's CMSIS-DAP interface: status, wake, release, reset, dump, watch, catch, flash (via probe-rs), measure. `tools/flash.sh` and `tools/measure.sh` are wrappers around it. See its README.
 - `tools/energytrace/` — captures, reverse-engineering notes, and `repro-cli`, the scratch tool the protocol was worked out with (EEPROM dump, legacy flows). New work goes in `tools/etrace`.
-- `tools/unwedge/` — raw CMSIS-DAP access to MSPM0's PWR-AP: wake a sleeping chip for the debugger, and release it again.
+- `tools/unwedge/` — the Python originals of etrace's sleep commands, still used by the edge_test rig (`tools/edge_*.py`: counter readout `peek`, config `cfg`, UART pulses), plus `replug.sh` (hub power cycle, bench wiring). New generic work goes in `tools/etrace`; keep the two in step if the PWR-AP sequences change.
 
 ### Key Documents
 

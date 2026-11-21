@@ -19,11 +19,9 @@ use std::time::{Duration, Instant};
 
 use rusb::{Context, DeviceHandle, UsbContext};
 
+use crate::board::{Probe, TI_VID};
 use crate::cal::{Calibration, Meta};
 use crate::{Error, Result};
-
-const TI_VID: u16 = 0x0451;
-const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
 
 const CMD_IFACE: u8 = 2;
 const EP_CMD_OUT: u8 = 0x02;
@@ -79,27 +77,20 @@ struct Usb {
 }
 
 impl Usb {
-    fn open(verbose: bool) -> Result<Usb> {
+    fn open(probe: &Probe, verbose: bool) -> Result<Usb> {
         let ctx = Context::new()?;
-        // With several LaunchPads plugged in, ETRACE_SERIAL (a serial number or its start) picks one.
-        let want = std::env::var("ETRACE_SERIAL").ok().filter(|w| !w.is_empty());
         let device = ctx
             .devices()?
             .iter()
             .find(|d| {
                 let Ok(desc) = d.device_descriptor() else { return false };
-                if desc.vendor_id() != TI_VID || !XDS110_PIDS.contains(&desc.product_id()) {
-                    return false;
-                }
-                let Some(want) = &want else { return true };
-                d.open()
-                    .and_then(|h| h.read_serial_number_string_ascii(&desc))
-                    .is_ok_and(|serial| serial.starts_with(want.as_str()))
+                desc.vendor_id() == TI_VID
+                    && desc.product_id() == probe.pid
+                    && d.open()
+                        .and_then(|h| h.read_serial_number_string_ascii(&desc))
+                        .is_ok_and(|serial| serial == probe.serial)
             })
-            .ok_or_else(|| match &want {
-                Some(want) => format!("no XDS110 probe with serial {want}... found on USB"),
-                None => "no XDS110 probe found on USB".to_string(),
-            })?;
+            .ok_or_else(|| format!("could not open the XDS110 with serial {}", probe.serial))?;
         // The handle is never reset: on this probe a USB reset drops it off the bus until it is replugged.
         let handle = device.open()?;
         for iface in [CMD_IFACE, DATA_IFACE] {
@@ -218,8 +209,8 @@ pub struct Session {
 impl Session {
     /// Open the probe, configure it for `rate` ticks per second and calibrate.
     /// Takes a second or two.
-    pub fn open(rate: u32, verbose: bool) -> Result<Session> {
-        let usb = Usb::open(verbose)?;
+    pub fn open(probe: &Probe, rate: u32, verbose: bool) -> Result<Session> {
+        let usb = Usb::open(probe, verbose)?;
         usb.dap_disconnect();
         usb.execute("XDS_ConnectET", CMD_XDS_CONNECT_ET, &[])?;
 
