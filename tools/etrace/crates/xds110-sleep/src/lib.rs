@@ -30,8 +30,9 @@
 //! `CTRL/STAT`, the PWR-AP's `DPREC0`, and through the AHB-AP nothing but
 //! `DHCSR` (only `release`, to withdraw a halt request); `release` also
 //! drives NRST. [`wake`] never halts or resets the chip. [`catch`],
-//! [`wake_or_catch`], [`dump`] and [`run_to_hardfault`] halt the core and
-//! also write `DEMCR` and `DCRSR`. Nothing in this crate writes flash,
+//! [`wake_or_catch`], [`dump`], [`run_to_hardfault`] and the register reads
+//! ([`core_register`], [`halted_registers`]) are for a halted core and also
+//! write `DEMCR` and `DCRSR`. Nothing in this crate writes flash,
 //! NONMAIN or the DSSM mailbox, so nothing here can erase a chip or lock it.
 //! The tests run the operations against a simulated chip and check this.
 //!
@@ -102,7 +103,9 @@ fn ahb_ap(d: &mut Dap) -> Result<Option<u32>> {
     d.unless_fault(|d| d.ap_read(0, AP_IDR))
 }
 
-fn core_register(d: &mut Dap, n: u32) -> Result<u32> {
+/// Read core register `n` of a halted core (13 SP, 14 LR, 15 PC, 16 xPSR),
+/// through `DCRSR` and `DCRDR`.
+pub fn core_register(d: &mut Dap, n: u32) -> Result<u32> {
     d.mem_write32(DCRSR, n)?;
     d.pause(1);
     d.mem_read32(DCRDR)

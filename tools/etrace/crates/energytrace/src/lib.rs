@@ -58,23 +58,33 @@
 //!
 //! # Together with a debugger
 //!
-//! Tested on an LP-MSPM0L1306 (probe firmware 3.0.0.34) with probe-rs 0.32
-//! and with the `xds110-sleep` crate, which both reach the probe through its
-//! CMSIS-DAP HID interface. The EnergyTrace interfaces are separate USB
-//! interfaces, so both can be open at once, but the order matters:
+//! Partly tested, on an LP-MSPM0L1306 (probe firmware 3.0.0.34). The
+//! EnergyTrace interfaces can be open while something else uses the probe
+//! for SWD, but the order matters.
 //!
-//! - **Open the session first, then attach the debugger: works.** probe-rs
-//!   attached and read memory while a capture was streaming, and the capture
-//!   was complete.
-//! - **Opening a session while a debugger is attached cuts the debugger
-//!   off.** [`Session::open`] sends `DAP_Disconnect`, because a debugger that
-//!   has left the probe "connected" makes it ignore EnergyTrace commands.
-//!   The session itself opens, calibrates and streams, but SWD transfers on
-//!   the connection that existed before fail from then on (no acknowledge)
-//!   until the debugger connects again.
+//! Observed:
+//!
+//! - **Session first, debugger second: works.** While a capture was
+//!   streaming, `probe-rs read` (0.32) attached, read memory and detached,
+//!   and the capture was complete. A whole debug session during a capture
+//!   was not tried.
+//! - **Opening a session breaks an SWD connection that is already open.** With
+//!   an `xds110-sleep` connection open and working, [`Session::open`] opened,
+//!   calibrated and streamed, but every SWD transfer on the older connection
+//!   failed from then on (no acknowledge), including ones that start with a
+//!   line reset. It worked again after the debug port was opened anew
+//!   (`Dap::open`, which sends `DAP_Connect`).
+//! - A session also opened while a `probe-rs gdb` server was attached and
+//!   idle. Whether that server could still reach the chip afterwards was not
+//!   checked; expect not, for the same reason.
+//!
+//! The likely cause, not proven: [`Session::open`] sends `DAP_Disconnect`,
+//! because a debugger that has left the probe "connected" makes it ignore
+//! EnergyTrace commands, and the probe's two CMSIS-DAP interfaces share that
+//! state.
 //!
 //! What a capture shows with a debugger attached is another matter: the
-//! debug holds keep the chip awake (about 1.1 mA on that board where the
+//! debug holds keep the chip awake (about 1.1 mA on that board, where the
 //! released firmware idles at 2 uA), so sleep current cannot be measured
 //! that way. Activity above that level is still visible.
 //!

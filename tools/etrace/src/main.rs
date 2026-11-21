@@ -754,8 +754,12 @@ fn watch(d: &mut Dap, secs: f64) -> Result<()> {
 
 fn catch(d: &mut Dap, trace: bool) -> Result<()> {
     sleep::catch(d)?;
-    let r = sleep::halted_registers(d)?;
-    println!("halted: PC {:#x} SP {:#x}", r.pc, r.sp);
+    // Only these two: at the reset vector the stack pointer is at the end of RAM.
+    println!(
+        "halted: PC {:#x} SP {:#x}",
+        sleep::core_register(d, 15)?,
+        sleep::core_register(d, 13)?
+    );
     if !trace {
         return Ok(());
     }

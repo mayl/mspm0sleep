@@ -23,14 +23,21 @@ pub trait Transport: Send {
 
 /// CMSIS-DAP command bytes this client uses.
 pub mod command {
-    #![allow(missing_docs)]
+    /// Connect in a mode: byte 1 is 1 for SWD.
     pub const DAP_CONNECT: u8 = 0x02;
+    /// Disconnect from the target.
     pub const DAP_DISCONNECT: u8 = 0x03;
+    /// Idle cycles, WAIT retries and match retries for transfers.
     pub const DAP_TRANSFER_CONFIGURE: u8 = 0x04;
+    /// Read or write DP and AP registers: index, count, then per transfer a request byte and, for a write, a word.
     pub const DAP_TRANSFER: u8 = 0x05;
+    /// Drive and read the SWCLK, SWDIO and nRESET pins: value, select mask, wait in microseconds.
     pub const DAP_SWJ_PINS: u8 = 0x10;
+    /// The SWD clock frequency in Hz.
     pub const DAP_SWJ_CLOCK: u8 = 0x11;
+    /// Clock out a bit sequence on SWDIO: bit count, then the bits.
     pub const DAP_SWJ_SEQUENCE: u8 = 0x12;
+    /// Turnaround and data phase of the SWD protocol.
     pub const DAP_SWD_CONFIGURE: u8 = 0x13;
 }
 use command::*;
