@@ -1,33 +1,19 @@
-//! EnergyTrace current measurement with the XDS110 debug probe found on TI
-//! LaunchPads, without Code Composer Studio.
+//! The parts of the `etrace` command-line tool that are not in the library
+//! crates it is built on:
 //!
-//! The probe powers the target through a DC/DC converter that delivers charge
-//! in fixed-size pulses and reports how many pulses it delivered and when.
-//! Current is the pulse rate, scaled by a two-point calibration the probe runs
-//! against a built-in reference load.
-//!
-//! - [`board`]: which probe, and so which LaunchPad, to talk to.
-//! - [`probe`]: USB transport and the EnergyTrace command sequence.
-//! - [`decode`]: the record stream the probe sends while measuring.
-//! - [`cal`]: calibration and the sidecar file saved next to a capture.
-//! - [`trace`]: pulses on a millisecond grid, with statistics and resampling.
-//! - [`plot`]: PNG, SVG and CSV output.
 //! - [`scope`]: the terminal oscilloscope.
-//! - [`dap`]: raw SWD access through the probe's CMSIS-DAP interface.
-//! - [`sleep`]: waking a sleeping MSPM0 for a debugger and handing it back; flashing.
+//! - [`plot`]: PNG, SVG and CSV output.
+//! - [`board`]: the LaunchPads the tool knows by name.
+//! - [`flash`]: writing an image with probe-rs to a chip that may be asleep.
 //!
-//! Protocol details were worked out from TI's libraries; see
-//! `tools/energytrace/THEIA_VERIFICATION.md` in this repository.
+//! Measurement lives in the `energytrace` crate, and debug access to a
+//! sleeping MSPM0 in `xds110-sleep`; a program that wants either should
+//! depend on those.
 
 pub mod board;
-pub mod cal;
-pub mod dap;
-pub mod decode;
+pub mod flash;
 pub mod plot;
-pub mod probe;
 pub mod scope;
-pub mod sleep;
-pub mod trace;
 
 /// Error with a message meant for the person at the terminal.
 #[derive(Debug)]
@@ -59,4 +45,29 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl From<energytrace::Error> for Error {
+    fn from(e: energytrace::Error) -> Self {
+        Error(e.to_string())
+    }
+}
+
+impl From<xds110_sleep::Error> for Error {
+    fn from(e: xds110_sleep::Error) -> Self {
+        Error(match e {
+            // The library does not know this tool's options.
+            xds110_sleep::Error::SeveralProbes { .. } => format!("{e} with --board or --serial"),
+            e => e.to_string(),
+        })
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Wake the chip for a debugger, as `etrace wake` does: if it does not
+/// answer when forced active, reset it and halt it at its reset vector.
+pub fn wake(d: &mut xds110_sleep::Dap) -> Result<xds110_sleep::Woken> {
+    xds110_sleep::wake_or_catch(d).map_err(|e| match e {
+        xds110_sleep::Error::NotResponding { .. } => "the AHB-AP does not answer, even right after reset".into(),
+        e => e.into(),
+    })
+}

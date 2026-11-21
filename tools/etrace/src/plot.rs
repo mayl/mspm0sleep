@@ -5,8 +5,9 @@ use std::path::Path;
 
 use plotters::prelude::*;
 
-use crate::cal::Calibration;
-use crate::trace::{fmt_axis, Trace};
+use energytrace::cal::Calibration;
+use energytrace::trace::{fmt_axis, Trace};
+
 use crate::Result;
 
 /// Current against time: `(seconds from the start of the trace, nA)` for each window of `bin_ms`.

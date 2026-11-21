@@ -1,17 +1,12 @@
-//! Which LaunchPad to talk to, when more than one is plugged in.
+//! The LaunchPads this tool knows by name, and choosing a probe by board.
 //!
 //! TI programs a serial number into the on-board XDS110 that starts with the
 //! board's name (`ML13...` on an LP-MSPM0L1306), so the probe identifies the
-//! board. Probes are listed from sysfs, which needs no permission and does not
-//! disturb a probe that another program has open.
+//! board.
 
-use std::fs;
-use std::path::Path;
+use xds110_sleep::probe;
 
 use crate::{Error, Result};
-
-pub const TI_VID: u16 = 0x0451;
-pub const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
 
 /// A LaunchPad this tool knows by name.
 #[derive(Debug, PartialEq)]
@@ -36,19 +31,17 @@ pub const BOARDS: &[Board] = &[
     },
 ];
 
-/// One XDS110 found on USB.
+/// A probe and, if known, the board it sits on.
 #[derive(Debug)]
 pub struct Probe {
-    pub serial: String,
-    pub pid: u16,
-    /// The board it sits on, if the serial number says so.
+    pub probe: probe::Probe,
     pub board: Option<&'static Board>,
 }
 
-impl Probe {
-    /// The probe selector probe-rs takes: `VID:PID:serial`.
-    pub fn probe_rs_selector(&self) -> String {
-        format!("{TI_VID:04x}:{:04x}:{}", self.pid, self.serial)
+impl std::ops::Deref for Probe {
+    type Target = probe::Probe;
+    fn deref(&self) -> &probe::Probe {
+        &self.probe
     }
 }
 
@@ -59,93 +52,60 @@ fn board_named(name: &str) -> Result<&'static Board> {
     })
 }
 
-fn board_of(serial: &str) -> Option<&'static Board> {
+/// The board whose probes have serial numbers like `serial`.
+pub fn board_of(serial: &str) -> Option<&'static Board> {
     BOARDS.iter().find(|b| serial.starts_with(b.serial_prefix))
-}
-
-fn hex(path: &Path) -> Option<u16> {
-    u16::from_str_radix(fs::read_to_string(path).ok()?.trim(), 16).ok()
-}
-
-/// Every XDS110 plugged in.
-pub fn probes() -> Vec<Probe> {
-    let mut found = Vec::new();
-    let Ok(dir) = fs::read_dir("/sys/bus/usb/devices") else {
-        return found;
-    };
-    for dev in dir.flatten().map(|e| e.path()) {
-        let (Some(vid), Some(pid)) = (hex(&dev.join("idVendor")), hex(&dev.join("idProduct"))) else {
-            continue;
-        };
-        if vid != TI_VID || !XDS110_PIDS.contains(&pid) {
-            continue;
-        }
-        let Ok(serial) = fs::read_to_string(dev.join("serial")) else {
-            continue;
-        };
-        let serial = serial.trim().to_string();
-        found.push(Probe {
-            board: board_of(&serial),
-            serial,
-            pid,
-        });
-    }
-    found.sort_by(|a, b| a.serial.cmp(&b.serial));
-    found
 }
 
 /// Pick the probe to use. `board` is a name from [`BOARDS`]; `serial` is a
 /// serial number or its start and wins over `board` for finding the probe.
 /// With neither, there must be exactly one probe.
 pub fn select(board: Option<&str>, serial: Option<&str>) -> Result<Probe> {
-    choose(probes(), board, serial)
+    choose(&probe::list(), board, serial)
 }
 
-fn choose(all: Vec<Probe>, board: Option<&str>, serial: Option<&str>) -> Result<Probe> {
+fn choose(all: &[probe::Probe], board: Option<&str>, serial: Option<&str>) -> Result<Probe> {
     let board = board.filter(|b| !b.is_empty()).map(board_named).transpose()?;
     let prefix = serial.filter(|s| !s.is_empty()).or(board.map(|b| b.serial_prefix));
-    let mut matching: Vec<Probe> = all
-        .into_iter()
+    // A serial number here is always a prefix, never a probe-rs selector.
+    let matching: Vec<probe::Probe> = all
+        .iter()
         .filter(|p| prefix.is_none_or(|want| p.serial.starts_with(want)))
+        .cloned()
         .collect();
-    match (matching.len(), prefix) {
-        (0, Some(want)) => Err(format!("no XDS110 probe with serial {want}... found on USB").into()),
-        (0, None) => Err("no XDS110 probe found on USB".into()),
-        (1, _) => {
-            let mut probe = matching.remove(0);
-            // A board named by hand also says what the chip is, whatever the serial number.
-            probe.board = board.or(probe.board);
-            Ok(probe)
-        }
-        _ => {
-            let serials: Vec<_> = matching.iter().map(|p| p.serial.as_str()).collect();
-            Err(format!(
-                "several XDS110 probes are plugged in ({}): choose one with --board or --serial",
-                serials.join(", ")
-            )
+    let probe = match (matching.as_slice(), prefix) {
+        ([], Some(want)) => {
+            return Err(xds110_sleep::Error::ProbeNotFound {
+                wanted: Some(want.to_string()),
+            }
             .into())
         }
-    }
+        (some, _) => probe::choose(some, None)?,
+    };
+    Ok(Probe {
+        // A board named by hand also says what the chip is, whatever the serial number.
+        board: board.or(board_of(&probe.serial)),
+        probe,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn two() -> Vec<Probe> {
+    fn two() -> Vec<probe::Probe> {
         ["MC110001", "ML130001"]
             .into_iter()
-            .map(|s| Probe {
+            .map(|s| probe::Probe {
                 serial: s.into(),
                 pid: 0xbef3,
-                board: board_of(s),
             })
             .collect()
     }
 
     #[test]
     fn board_picks_its_probe() {
-        let p = choose(two(), Some("c1104"), None).unwrap();
+        let p = choose(&two(), Some("c1104"), None).unwrap();
         assert_eq!(p.serial, "MC110001");
         assert_eq!(p.board.unwrap().chip, "MSPM0C1104");
         assert_eq!(p.probe_rs_selector(), "0451:bef3:MC110001");
@@ -153,21 +113,28 @@ mod tests {
 
     #[test]
     fn serial_wins_and_names_the_board() {
-        let p = choose(two(), None, Some("ML13")).unwrap();
+        let p = choose(&two(), None, Some("ML13")).unwrap();
         assert_eq!(p.board.unwrap().name, "l1306");
     }
 
     #[test]
     fn two_probes_need_a_choice() {
-        assert!(choose(two(), None, None).is_err());
-        assert!(choose(two(), Some("g3507"), None).is_err());
-        assert!(choose(two(), None, Some("XX")).is_err());
+        let e = choose(&two(), None, None).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "several XDS110 probes are plugged in (MC110001, ML130001): choose one with --board or --serial"
+        );
+        assert!(choose(&two(), Some("g3507"), None).is_err());
+        let e = choose(&two(), None, Some("XX")).unwrap_err();
+        assert_eq!(e.to_string(), "no XDS110 probe with serial XX... found on USB");
+        assert_eq!(
+            choose(&[], None, None).unwrap_err().to_string(),
+            "no XDS110 probe found on USB"
+        );
     }
 
     #[test]
     fn one_probe_needs_none() {
-        let mut one = two();
-        one.truncate(1);
-        assert_eq!(choose(one, None, None).unwrap().serial, "MC110001");
+        assert_eq!(choose(&two()[..1], None, None).unwrap().serial, "MC110001");
     }
 }

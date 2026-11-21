@@ -1,0 +1,12 @@
+[package]
+name = "xds110-sleep"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Debug access to a sleeping TI MSPM0 through a LaunchPad's XDS110 probe: tell whether the chip is asleep, wake it for a debugger, and release it again"
+repository = "https://github.com/mayl/mspm0sleep"
+publish = false
+
+# Only std: probes are found through sysfs and CMSIS-DAP goes through hidraw.
+[dependencies]

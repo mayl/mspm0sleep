@@ -12,11 +12,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, BorderType, Chart, Clear, Dataset, GraphType, Paragraph};
 use ratatui::{DefaultTerminal, Frame, Terminal};
 
-use crate::cal::{Calibration, SUPPLY_V};
-use crate::decode::Decoder;
 use crate::plot::nice_step;
-use crate::trace::{fmt_axis, fmt_current, Trace};
 use crate::Result;
+use energytrace::cal::{Calibration, SUPPLY_V};
+use energytrace::decode::Decoder;
+use energytrace::trace::{fmt_axis, fmt_current, Trace};
 
 /// What a data source sends to the scope.
 pub enum Feed {
@@ -804,7 +804,7 @@ fn fmt_energy(uj: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode::Event;
+    use energytrace::decode::Event;
 
     /// Raw stream: `ms` milliseconds at 10 kHz with one pulse every `period` ticks.
     fn stream(ms: u64, period: u64) -> Vec<u8> {

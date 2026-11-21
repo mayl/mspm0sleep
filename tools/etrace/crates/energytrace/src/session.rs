@@ -15,13 +15,20 @@
 //! calibration command out of that order stalls the probe's command interface
 //! until it is power-cycled.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rusb::{Context, DeviceHandle, UsbContext};
 
-use crate::board::{Probe, TI_VID};
 use crate::cal::{Calibration, Meta};
+use crate::decode::{Counters, Decoder, Event};
+use crate::source::{Poll, Source};
+use crate::trace::Trace;
 use crate::{Error, Result};
+
+const TI_VID: u16 = 0x0451;
+const XDS110_PIDS: &[u16] = &[0xbef3, 0xbef4, 0x1cbe, 0x029e, 0x029f, 0x02a5];
 
 const CMD_IFACE: u8 = 2;
 const EP_CMD_OUT: u8 = 0x02;
@@ -57,27 +64,54 @@ const CAL_TICKS_PER_S: f64 = 10_000.0;
 /// Probe hardware versions whose reference load is 2200 ohm switched by selector 1.
 const SUPPORTED_HARDWARE: &[u16] = &[0x28, 0x2d];
 
-impl From<rusb::Error> for Error {
-    fn from(e: rusb::Error) -> Self {
-        Error(match e {
-            rusb::Error::Access => {
-                "no permission to open the XDS110 (add a udev rule for USB ID 0451:bef3, or run as root)".into()
-            }
-            rusb::Error::Busy => "the XDS110 is in use by another program (CCS, UniFlash, another etrace?)".into(),
-            rusb::Error::NoDevice => "the XDS110 was disconnected".into(),
-            other => format!("USB error: {other}"),
-        })
-    }
+/// Something a [`Session`] did, passed to the callback given to
+/// [`Session::open_logged`] (for a verbose mode).
+#[derive(Clone, Copy, Debug)]
+pub enum Log<'a> {
+    /// Bytes a previous user left queued on an endpoint were discarded.
+    Drained {
+        /// The IN endpoint.
+        endpoint: u8,
+        /// How many bytes.
+        bytes: usize,
+    },
+    /// A command was sent and answered.
+    Command {
+        /// Name of the command.
+        name: &'static str,
+        /// The request as sent.
+        tx: &'a [u8],
+        /// The response as received.
+        rx: &'a [u8],
+        /// How long the probe took.
+        elapsed: Duration,
+    },
+    /// A packet of the measurement stream arrived.
+    Stream {
+        /// Its length.
+        bytes: usize,
+        /// Time since the session was opened.
+        at: Duration,
+    },
 }
+
+/// Callback for [`Log`] entries.
+pub type Logger = Box<dyn FnMut(Log<'_>) + Send>;
 
 /// An open XDS110 with both interfaces claimed.
 struct Usb {
     handle: DeviceHandle<Context>,
-    verbose: bool,
+    logger: Option<Mutex<Logger>>,
 }
 
 impl Usb {
-    fn open(probe: &Probe, verbose: bool) -> Result<Usb> {
+    fn log(&self, entry: Log<'_>) {
+        if let Some(logger) = &self.logger {
+            (logger.lock().unwrap_or_else(|e| e.into_inner()))(entry);
+        }
+    }
+
+    fn open(serial: &str, logger: Option<Logger>) -> Result<Usb> {
         let ctx = Context::new()?;
         let device = ctx
             .devices()?
@@ -85,12 +119,14 @@ impl Usb {
             .find(|d| {
                 let Ok(desc) = d.device_descriptor() else { return false };
                 desc.vendor_id() == TI_VID
-                    && desc.product_id() == probe.pid
+                    && XDS110_PIDS.contains(&desc.product_id())
                     && d.open()
                         .and_then(|h| h.read_serial_number_string_ascii(&desc))
-                        .is_ok_and(|serial| serial == probe.serial)
+                        .is_ok_and(|s| s == serial)
             })
-            .ok_or_else(|| format!("could not open the XDS110 with serial {}", probe.serial))?;
+            .ok_or_else(|| Error::ProbeNotFound {
+                serial: serial.to_string(),
+            })?;
         // The handle is never reset: on this probe a USB reset drops it off the bus until it is replugged.
         let handle = device.open()?;
         for iface in [CMD_IFACE, DATA_IFACE] {
@@ -99,7 +135,10 @@ impl Usb {
             }
             handle.claim_interface(iface)?;
         }
-        let usb = Usb { handle, verbose };
+        let usb = Usb {
+            handle,
+            logger: logger.map(Mutex::new),
+        };
         usb.drain(EP_CMD_IN);
         usb.drain(EP_DATA_IN);
         Ok(usb)
@@ -116,8 +155,11 @@ impl Usb {
                 _ => break,
             }
         }
-        if self.verbose && total > 0 {
-            eprintln!("drained {total} stale bytes from endpoint {ep:#04x}");
+        if total > 0 {
+            self.log(Log::Drained {
+                endpoint: ep,
+                bytes: total,
+            });
         }
     }
 
@@ -136,7 +178,7 @@ impl Usb {
     }
 
     /// Send one command and return the response payload (after the status word).
-    fn execute(&self, name: &str, cmd: u8, payload: &[u8]) -> Result<Vec<u8>> {
+    fn execute(&self, name: &'static str, cmd: u8, payload: &[u8]) -> Result<Vec<u8>> {
         let mut tx = vec![SYNC];
         tx.extend_from_slice(&((1 + payload.len()) as u16).to_le_bytes());
         tx.push(cmd);
@@ -147,32 +189,29 @@ impl Usb {
         let mut rx = [0u8; 4352];
         let n = match self.handle.read_bulk(EP_CMD_IN, &mut rx, CMD_TIMEOUT) {
             Ok(n) => n,
-            Err(rusb::Error::Timeout) => {
-                return Err(format!(
-                    "{name}: the probe did not answer. Its command interface is probably stalled; \
-                     unplug and replug the LaunchPad (or power-cycle its USB port) and try again."
-                )
-                .into())
-            }
+            Err(rusb::Error::Timeout) => return Err(Error::NoAnswer { command: name }),
             Err(e) => return Err(e.into()),
         };
-        if self.verbose {
-            eprintln!(
-                "{name}: tx {tx:02x?}  rx {:02x?}  ({} ms)",
-                &rx[..n.min(24)],
-                sent.elapsed().as_millis()
-            );
-        }
+        self.log(Log::Command {
+            name,
+            tx: &tx,
+            rx: &rx[..n],
+            elapsed: sent.elapsed(),
+        });
+        let bad = |detail: String| Error::BadResponse { command: name, detail };
         if n < 7 || rx[0] != SYNC {
-            return Err(format!("{name}: malformed response ({n} bytes: {:02x?})", &rx[..n.min(16)]).into());
+            return Err(bad(format!(
+                "malformed response ({n} bytes: {:02x?})",
+                &rx[..n.min(16)]
+            )));
         }
         let len = u16::from_le_bytes([rx[1], rx[2]]) as usize;
         if len + 3 != n {
-            return Err(format!("{name}: response length field says {len} bytes, got {}", n - 3).into());
+            return Err(bad(format!("response length field says {len} bytes, got {}", n - 3)));
         }
         let status = i32::from_le_bytes([rx[3], rx[4], rx[5], rx[6]]);
         if status != 0 {
-            return Err(format!("{name}: probe returned status {status}").into());
+            return Err(Error::Refused { command: name, status });
         }
         Ok(rx[7..n].to_vec())
     }
@@ -181,7 +220,9 @@ impl Usb {
 /// What the probe reported about itself.
 #[derive(Clone, Copy, Debug)]
 pub struct ProbeInfo {
+    /// Firmware version, one byte per part.
     pub firmware: u32,
+    /// Hardware version; it decides the calibration loads.
     pub hardware: u16,
 }
 
@@ -193,42 +234,63 @@ impl ProbeInfo {
     }
 }
 
-/// A configured and calibrated EnergyTrace session.
+/// A configured and calibrated EnergyTrace session on one probe.
+///
+/// Opening it calibrates. After that, either take the raw stream
+/// ([`Session::start`], [`Session::read`], [`Session::stop`], or
+/// [`Session::pump`] for the whole loop), or let the session decode it
+/// ([`Source::poll`], then [`Session::finish`]); do not mix the two, or the
+/// decoder misses what was read raw. Dropping the session stops the probe.
+///
+/// A session is `Send`, so it can be opened in one thread and polled in another.
 pub struct Session {
     usb: Usb,
+    /// What the probe said it is.
     pub info: ProbeInfo,
+    /// Ticks per second the probe was configured for.
     pub rate: u32,
+    /// The scale from this session's calibration.
     pub cal: Calibration,
-    /// Raw calibration readings (pulses, ticks): reference load, then open.
+    /// Raw calibration reading with the reference load: (pulses, ticks).
     pub cal_loaded: (u32, u32),
+    /// Raw calibration reading with no load: (pulses, ticks).
     pub cal_open: (u32, u32),
     started: bool,
     opened: Instant,
+    decoder: Decoder,
+    chunk: Vec<u8>,
+    chunk_len: usize,
 }
 
 impl Session {
-    /// Open the probe, configure it for `rate` ticks per second and calibrate.
-    /// Takes a second or two.
-    pub fn open(probe: &Probe, rate: u32, verbose: bool) -> Result<Session> {
-        let usb = Usb::open(probe, verbose)?;
+    /// Open the probe with this serial number, configure it for `rate` ticks
+    /// per second (10 000 is what TI uses) and calibrate. Takes a second or two.
+    pub fn open(serial: &str, rate: u32) -> Result<Session> {
+        Session::open_logged(serial, rate, None)
+    }
+
+    /// [`Session::open`], reporting every command and stream packet to `logger`.
+    pub fn open_logged(serial: &str, rate: u32, logger: Option<Logger>) -> Result<Session> {
+        let usb = Usb::open(serial, logger)?;
         usb.dap_disconnect();
         usb.execute("XDS_ConnectET", CMD_XDS_CONNECT_ET, &[])?;
 
+        let short = |command| Error::BadResponse {
+            command,
+            detail: "short response".into(),
+        };
         let v = usb.execute("XDS_Version", CMD_XDS_VERSION, &[])?;
         if v.len() < 6 {
-            return Err("XDS_Version: short response".into());
+            return Err(short("XDS_Version"));
         }
         let info = ProbeInfo {
             firmware: u32::from_le_bytes([v[0], v[1], v[2], v[3]]),
             hardware: u16::from_le_bytes([v[4], v[5]]),
         };
         if !SUPPORTED_HARDWARE.contains(&info.hardware) {
-            return Err(format!(
-                "probe hardware version {:#06x} is not supported: its calibration loads differ from the \
-                 2200 ohm reference this tool assumes (supported: 0x28, 0x2d)",
-                info.hardware
-            )
-            .into());
+            return Err(Error::UnsupportedHardware {
+                hardware: info.hardware,
+            });
         }
 
         usb.execute("ET_Setup_Range", CMD_ET_SETUP_RANGE, &[0])?;
@@ -243,12 +305,15 @@ impl Session {
         let calibrate = |selector: u16| -> Result<(u32, u32)> {
             let r = usb.execute("ET_Calibrate", CMD_ET_CALIBRATE, &selector.to_le_bytes())?;
             if r.len() < 8 {
-                return Err("ET_Calibrate: short response".into());
+                return Err(short("ET_Calibrate"));
             }
             let pulses = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
             let ticks = u32::from_le_bytes([r[4], r[5], r[6], r[7]]);
             if ticks == 0 {
-                return Err("ET_Calibrate: probe reported zero elapsed time".into());
+                return Err(Error::BadResponse {
+                    command: "ET_Calibrate",
+                    detail: "probe reported zero elapsed time".into(),
+                });
             }
             Ok((pulses, ticks))
         };
@@ -256,12 +321,10 @@ impl Session {
         let cal_open = calibrate(0)?;
         let pps = |(pulses, ticks): (u32, u32)| pulses as f64 * CAL_TICKS_PER_S / ticks as f64;
         if pps(cal_loaded) <= pps(cal_open) {
-            return Err(format!(
-                "calibration failed: {:.1} pulses/s with the reference load, {:.1} without",
-                pps(cal_loaded),
-                pps(cal_open)
-            )
-            .into());
+            return Err(Error::Calibration {
+                loaded_pps: pps(cal_loaded),
+                open_pps: pps(cal_open),
+            });
         }
         let cal = Calibration::from_points(pps(cal_loaded), pps(cal_open));
 
@@ -274,6 +337,9 @@ impl Session {
             cal_open,
             started: false,
             opened: Instant::now(),
+            decoder: Decoder::new(),
+            chunk: vec![0u8; 64 * 1024],
+            chunk_len: 0,
         })
     }
 
@@ -308,14 +374,62 @@ impl Session {
     pub fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
         match self.usb.handle.read_bulk(EP_DATA_IN, buf, timeout) {
             Ok(n) => {
-                if self.usb.verbose {
-                    eprintln!("stream: {n} bytes at {:.3} s", self.opened.elapsed().as_secs_f64());
-                }
+                self.usb.log(Log::Stream {
+                    bytes: n,
+                    at: self.opened.elapsed(),
+                });
                 Ok(n)
             }
             Err(rusb::Error::Timeout) => Ok(0),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Start the stream and pass each chunk of it to `sink` until `stop` is
+    /// set, then stop the probe and pass on what was still in flight.
+    ///
+    /// `sink` may fail with an error type of its own; the probe is stopped
+    /// before that error is returned.
+    pub fn pump<E: From<Error>>(
+        &mut self,
+        stop: &AtomicBool,
+        mut sink: impl FnMut(&[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        let mut buf = vec![0u8; 64 * 1024];
+        self.start()?;
+        let run: std::result::Result<(), E> = (|| {
+            while !stop.load(Ordering::SeqCst) {
+                let n = self.read(&mut buf, Duration::from_millis(200))?;
+                if n > 0 {
+                    sink(&buf[..n])?;
+                }
+            }
+            Ok(())
+        })();
+        let tail = self.stop();
+        run?;
+        sink(&tail?)
+    }
+
+    /// Measure for `duration`, on the probe's clock, and return the trace.
+    /// Current and statistics come from it with [`Session::cal`]:
+    /// `trace.summary(&session.cal, 100)`.
+    ///
+    /// The probe sends data in packets, and one can hold over a second of it
+    /// while the target sleeps, so the trace may be that much longer than asked.
+    pub fn record(&mut self, duration: Duration) -> Result<Trace> {
+        let ticks = (duration.as_secs_f64() * self.rate as f64) as u64;
+        let mut trace = Trace::new(self.rate);
+        let mut decoder = Decoder::new();
+        let stop = AtomicBool::new(false);
+        self.pump(&stop, |bytes| {
+            if !stop.load(Ordering::SeqCst) {
+                decoder.feed(bytes, |e| trace.push(e));
+                stop.store(decoder.now() >= ticks, Ordering::SeqCst);
+            }
+            Ok::<(), Error>(())
+        })?;
+        Ok(trace)
     }
 
     /// Stop the stream and return the bytes that were still in flight.
@@ -340,10 +454,73 @@ impl Session {
     }
 }
 
+impl Session {
+    /// Stop the stream and decode what was still in flight, for a session
+    /// driven with [`Source::poll`]. The raw bytes of that tail are in
+    /// [`Session::last_chunk`] afterwards.
+    pub fn finish(&mut self, mut on: impl FnMut(Event)) -> Result<()> {
+        let tail = self.stop()?;
+        self.decoder.feed(&tail, &mut on);
+        self.chunk_len = tail.len().min(self.chunk.len());
+        self.chunk[..self.chunk_len].copy_from_slice(&tail[..self.chunk_len]);
+        Ok(())
+    }
+
+    /// The raw bytes the last [`Source::poll`] (or [`Session::finish`])
+    /// decoded: append them to a file to record the capture.
+    pub fn last_chunk(&self) -> &[u8] {
+        &self.chunk[..self.chunk_len]
+    }
+}
+
+impl Source for Session {
+    fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    fn calibration(&self) -> Calibration {
+        self.cal
+    }
+
+    fn now(&self) -> u64 {
+        self.decoder.now()
+    }
+
+    fn counters(&self) -> Counters {
+        self.decoder.counters
+    }
+
+    /// Starts the stream on the first call. Never returns [`Poll::End`].
+    fn poll(&mut self, timeout: Duration, on: &mut dyn FnMut(Event)) -> Result<Poll> {
+        if !self.started {
+            self.start()?;
+        }
+        let mut chunk = std::mem::take(&mut self.chunk);
+        let read = self.read(&mut chunk, timeout);
+        self.chunk = chunk;
+        self.chunk_len = *read.as_ref().unwrap_or(&0);
+        let n = read?;
+        if n == 0 {
+            return Ok(Poll::Idle);
+        }
+        self.decoder.feed(&self.chunk[..n], on);
+        Ok(Poll::Data(n))
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.stop();
         let _ = self.usb.handle.release_interface(CMD_IFACE);
         let _ = self.usb.handle.release_interface(DATA_IFACE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_session_can_move_to_another_thread() {
+        fn is_send<T: Send>() {}
+        is_send::<super::Session>();
     }
 }

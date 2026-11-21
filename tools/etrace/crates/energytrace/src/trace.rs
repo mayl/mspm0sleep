@@ -18,10 +18,12 @@ pub struct Trace {
     pending: u64,
     /// Keep at most this many milliseconds (0 = everything).
     max_ms: usize,
+    /// The probe reported overcurrent at some point.
     pub overcurrent: bool,
 }
 
 impl Trace {
+    /// An empty trace for a stream of `rate` ticks per second.
     pub fn new(rate: u32) -> Self {
         Trace {
             rate: rate.max(1),
@@ -47,6 +49,7 @@ impl Trace {
         (trace, dec)
     }
 
+    /// Ticks per second, as last stated by the stream.
     pub fn rate(&self) -> u32 {
         self.rate
     }
@@ -65,6 +68,7 @@ impl Trace {
         self.first_ms + self.cum.len() as u64 - 1
     }
 
+    /// Add one decoded event.
     pub fn push(&mut self, event: Event) {
         match event {
             Event::Config { rate } => {
@@ -172,15 +176,21 @@ impl Trace {
 /// Statistics for a stretch of trace. Currents in nA.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Summary {
+    /// Length of the stretch, in seconds.
     pub duration_s: f64,
+    /// Charge pulses in it.
     pub pulses: u64,
     /// Mean current over the whole stretch.
     pub mean_na: f64,
     /// Window length used for the percentiles below.
     pub bin_ms: u64,
+    /// Lowest window.
     pub min_na: f64,
+    /// 10th-percentile window: the quiescent level of a target that wakes now and then.
     pub p10_na: f64,
+    /// Median window.
     pub median_na: f64,
+    /// Highest window.
     pub max_na: f64,
     /// 10th-percentile window, as a raw pulse rate. Shows how far the floor is from the calibration offset.
     pub floor_pps: f64,

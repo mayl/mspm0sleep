@@ -28,11 +28,22 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The stream (re)started at `rate` ticks per second.
-    Config { rate: u32 },
+    Config {
+        /// Ticks per second.
+        rate: u32,
+    },
     /// At time `tick`, `pulses` charge pulses had been delivered since the previous record.
-    Pulses { tick: u64, pulses: u32 },
+    Pulses {
+        /// Stream time of the record, in ticks since the first record.
+        tick: u64,
+        /// Charge pulses since the previous record.
+        pulses: u32,
+    },
     /// Time reached `tick` with no pulses to report.
-    Tick { tick: u64 },
+    Tick {
+        /// Stream time reached, in ticks since the first record.
+        tick: u64,
+    },
     /// The probe's overcurrent protection tripped.
     Overcurrent,
 }
@@ -40,12 +51,17 @@ pub enum Event {
 /// Counters for a decoded stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
+    /// Stream starts.
     pub configs: u64,
+    /// Tick-counter wraps reported.
     pub heartbeats: u64,
+    /// Pulse records, including discarded ones.
     pub pulse_records: u64,
     /// Pulse records dropped after a stream start (TI drops the first 10; the first carries a junk count).
     pub discarded: u64,
+    /// Overcurrent reports.
     pub overcurrent: u64,
+    /// Pause records.
     pub paused: u64,
     /// Records of kinds this decoder skips.
     pub other_records: u64,
@@ -67,6 +83,7 @@ pub struct Decoder {
     /// Latest time reported, on the continuous timeline.
     now: u64,
     discard: u8,
+    /// What was decoded so far.
     pub counters: Counters,
 }
 
@@ -77,6 +94,7 @@ impl Default for Decoder {
 }
 
 impl Decoder {
+    /// A decoder at the start of a stream.
     pub fn new() -> Self {
         Decoder {
             carry: Vec::new(),

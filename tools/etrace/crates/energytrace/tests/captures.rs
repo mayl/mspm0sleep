@@ -3,12 +3,12 @@
 
 use std::path::PathBuf;
 
-use etrace::cal::Calibration;
-use etrace::trace::Trace;
+use energytrace::cal::Calibration;
+use energytrace::trace::Trace;
 
 fn capture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../energytrace/captures")
+        .join("../../../energytrace/captures")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }

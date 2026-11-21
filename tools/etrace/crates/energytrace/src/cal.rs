@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{Error, Result};
 
 /// Current drawn by the probe's reference load during calibration:
 /// 3300 mV across 2200 ohm, in nA. Holds for probe hardware 0x28 and 0x2d.
@@ -60,27 +60,33 @@ impl Calibration {
 /// Sidecar written as `<capture>.json` next to a raw `<capture>.bin`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Meta {
+    /// The scale measured at the start of the capture.
     pub calibration: Calibration,
     /// Ticks per second requested from the probe.
     pub sample_rate: u32,
+    /// Hardware version the probe reported.
     pub probe_hardware: u16,
+    /// Firmware version the probe reported, one byte per part.
     pub probe_firmware: u32,
     /// Seconds since the Unix epoch when the capture started.
     pub started_unix: u64,
-    /// Raw calibration readings: (pulses, ticks) with the reference load, then open.
+    /// Raw calibration reading with the reference load: (pulses, ticks).
     pub cal_loaded: (u32, u32),
+    /// Raw calibration reading with no load: (pulses, ticks).
     pub cal_open: (u32, u32),
 }
 
 impl Meta {
+    /// Where the sidecar of `capture` lives: the same name with `.json`.
     pub fn path_for(capture: &Path) -> PathBuf {
         capture.with_extension("json")
     }
 
+    /// Write the sidecar for `capture`.
     pub fn save(&self, capture: &Path) -> Result<()> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(Self::path_for(capture), text + "\n")?;
-        Ok(())
+        let text = serde_json::to_string_pretty(self).map_err(|e| Error::Sidecar(e.to_string()))?;
+        let path = Self::path_for(capture);
+        std::fs::write(&path, text + "\n").map_err(|source| Error::File { path, source })
     }
 
     /// The sidecar for `capture`, if there is one.
